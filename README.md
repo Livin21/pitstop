@@ -77,7 +77,9 @@ Claude Code holds its access token in memory. After a switch:
 ```
 
 Dev loop: `swift build && .build/debug/PitStop --check` prints accounts and
-live usage to stdout without starting the GUI.
+live usage to stdout without starting the GUI. For README captures,
+`/Applications/PitStop.app/Contents/MacOS/PitStop --screenshot` runs the
+app with sample addresses rendered in place of real emails.
 
 The app icon (usage gauge with a coral needle nearing the red zone, over a
 checkered pit-lane strip) is drawn programmatically — regenerate

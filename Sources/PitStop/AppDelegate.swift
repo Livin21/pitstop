@@ -87,6 +87,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Don't re-fetch on menu open if data is younger than this.
     private let menuRefreshDebounce: TimeInterval = 30
 
+    /// `--screenshot` renders sample addresses in place of real emails
+    /// everywhere the UI shows one, for README captures (docs/menu.png).
+    /// Run: /Applications/PitStop.app/Contents/MacOS/PitStop --screenshot
+    private let maskEmails = CommandLine.arguments.contains("--screenshot")
+
+    private func displayEmail(_ email: String) -> String {
+        guard maskEmails else { return email }
+        let masks = ["asha@work.com", "personal@example.com", "side@example.com"]
+        let i = store.profiles.map(\.email).sorted().firstIndex(of: email) ?? 0
+        return i < masks.count ? masks[i] : "account\(i + 1)@example.com"
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.imagePosition = .imageLeading
@@ -232,13 +244,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let sorted = sortedProfiles()
         guard sorted.count == accountRows.count else { return false }
         let models = sorted.map(rowModel(for:))
+        // Keyed by profile email, not model.email — the latter may be a
+        // masked display address (--screenshot).
         let current = Dictionary(uniqueKeysWithValues: accountRows.map { ($0.email, $0.view) })
-        for model in models {
-            guard let view = current[model.email],
+        for (profile, model) in zip(sorted, models) {
+            guard let view = current[profile.email],
                   AccountRowView.height(for: model) == view.frame.height else { return false }
         }
-        for model in models {
-            current[model.email]?.apply(model)
+        for (profile, model) in zip(sorted, models) {
+            current[profile.email]?.apply(model)
         }
         if let lastRefresh {
             updatedItem?.attributedTitle = detailText(
@@ -326,7 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func statusTip(email: String, report: UsageReport) -> String {
-        var tip = "\(email)\n5-hour \(Format.percent(report.fiveHour?.utilization))"
+        var tip = "\(displayEmail(email))\n5-hour \(Format.percent(report.fiveHour?.utilization))"
             + " · weekly \(Format.percent(report.sevenDay?.utilization))"
         if let err = fetchError[email] {
             tip += "\n⚠️ \(err) — showing data from \(Format.updated.string(from: report.fetchedAt))"
@@ -379,7 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let sub = NSMenu()
             sub.autoenablesItems = false
             for profile in removable {
-                let item = NSMenuItem(title: profile.email,
+                let item = NSMenuItem(title: displayEmail(profile.email),
                                       action: #selector(removeAccount(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = profile.email
@@ -485,7 +499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let isActive = email == activeEmail
         return AccountRowView.Model(
-            email: email,
+            email: displayEmail(email),
             planLabel: profile.planLabel,
             isActive: isActive,
             bars: bars,
@@ -526,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 activeEmail = email
                 notifiedBucket[email] = nil
                 Notifier.shared.post(
-                    title: "Switched to \(email)",
+                    title: "Switched to \(displayEmail(email))",
                     body: "New Claude Code sessions use this account. Running sessions pick it up on their next token refresh.")
                 refreshAll()
             } catch {
@@ -539,7 +553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             do {
                 if let profile = try await store.captureCurrent() {
-                    Notifier.shared.post(title: "Saved \(profile.email)",
+                    Notifier.shared.post(title: "Saved \(displayEmail(profile.email))",
                                          body: "This account can now be switched to from PitStop.")
                 } else {
                     showError("Nothing to save",
@@ -626,7 +640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 .min { $0.1 < $1.1 }
             let hint: String
             if let best, best.1 < 80 {
-                hint = "Best pit: \(best.0) (\(Int(best.1.rounded()))% used) — switch from the menu."
+                hint = "Best pit: \(displayEmail(best.0)) (\(Int(best.1.rounded()))% used) — switch from the menu."
             } else if best != nil {
                 hint = "All saved accounts are running hot — check the menu."
             } else {
@@ -634,7 +648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             Notifier.shared.post(
                 title: "Claude Code usage at \(Int(pct.rounded()))%",
-                body: "\(email) — \(reset). \(hint)")
+                body: "\(displayEmail(email)) — \(reset). \(hint)")
         }
         notifiedBucket[email] = bucket
     }
