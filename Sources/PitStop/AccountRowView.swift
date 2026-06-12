@@ -23,7 +23,7 @@ final class AccountRowView: NSView {
 
     static let rowWidth: CGFloat = 408
 
-    private let model: Model
+    private var model: Model
     private var hovering: Bool
 
     private let coral = NSColor(srgbRed: 217 / 255, green: 119 / 255,
@@ -35,16 +35,32 @@ final class AccountRowView: NSView {
     private let pctRightEdge: CGFloat = 230
     private let resetX: CGFloat = 240
 
-    init(model: Model, hover: Bool = false) {
-        self.model = model
-        self.hovering = hover
+    static func height(for model: Model) -> CGFloat {
         var height: CGFloat = 29 + CGFloat(model.bars.count) * 16 + 6
         if model.modelsLine != nil { height += 15 }
         if model.statusLine != nil { height += 15 }
-        super.init(frame: NSRect(x: 0, y: 0, width: Self.rowWidth, height: height))
+        return height
+    }
+
+    init(model: Model, hover: Bool = false) {
+        self.model = model
+        self.hovering = hover
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.rowWidth,
+                                 height: Self.height(for: model)))
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// Refresh the row's data in place (keeps hover state, so the open menu
+    /// doesn't flicker on periodic refresh). Fails when the new model needs
+    /// a different row height — the caller falls back to a full rebuild.
+    @discardableResult
+    func apply(_ new: Model) -> Bool {
+        guard Self.height(for: new) == frame.height else { return false }
+        model = new
+        needsDisplay = true
+        return true
+    }
 
     override var isFlipped: Bool { true }
 

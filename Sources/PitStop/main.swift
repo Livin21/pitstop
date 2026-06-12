@@ -9,7 +9,7 @@ if CommandLine.arguments.contains("--check") {
         defer { semaphore.signal() }
         let store = ProfileStore()
         do {
-            try store.captureCurrent()
+            try await store.captureCurrent()
         } catch {
             print("capture failed: \(error.localizedDescription)")
         }
@@ -20,7 +20,7 @@ if CommandLine.arguments.contains("--check") {
             let isActive = profile.email == active
             print("\n\(isActive ? "●" : "○") \(profile.email)  [\(profile.planLabel)]")
             do {
-                guard let blob = try store.blob(for: profile.email, isActive: isActive) else {
+                guard let blob = try await store.blob(for: profile.email, isActive: isActive) else {
                     print("   no stored credentials")
                     continue
                 }
@@ -31,7 +31,7 @@ if CommandLine.arguments.contains("--check") {
                     let patched = try CredentialBlob.patching(
                         blob, accessToken: fresh.accessToken,
                         refreshToken: fresh.refreshToken, expiresAtMs: fresh.expiresAtMs)
-                    try store.storeRefreshedBlob(patched, email: profile.email, isActive: isActive)
+                    try await store.storeRefreshedBlob(patched, email: profile.email, isActive: isActive)
                     creds.accessToken = fresh.accessToken
                 }
                 let report = try await UsageAPI.fetchUsage(accessToken: creds.accessToken)

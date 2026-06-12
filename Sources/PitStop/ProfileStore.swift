@@ -101,22 +101,22 @@ final class ProfileStore {
     /// Called on every refresh so the saved copy of the active account always
     /// holds the newest tokens. Returns nil when nobody is logged in.
     @discardableResult
-    func captureCurrent() throws -> Profile? {
-        guard let blob = try Keychain.read(service: CredentialBlob.liveService) else { return nil }
+    func captureCurrent() async throws -> Profile? {
+        guard let blob = try await Keychain.read(service: CredentialBlob.liveService) else { return nil }
         guard let account = ClaudeConfig.oauthAccount(),
               let email = account["emailAddress"] as? String else { return nil }
 
         // Called on every refresh — skip the keychain/file writes when
         // nothing changed since the last capture.
         if let existing = profiles.first(where: { $0.email == email }),
-           let storedBlob = try? Keychain.read(service: CredentialBlob.profileService, account: email),
+           let storedBlob = try? await Keychain.read(service: CredentialBlob.profileService, account: email),
            storedBlob == blob,
            (existing.oauthAccount as NSDictionary) == (account as NSDictionary) {
             return existing
         }
 
         let creds = try CredentialBlob.parse(blob)
-        try Keychain.upsert(service: CredentialBlob.profileService, account: email, data: blob)
+        try await Keychain.upsert(service: CredentialBlob.profileService, account: email, data: blob)
         let profile = Profile(email: email, savedAt: Date(),
                               subscriptionType: creds.subscriptionType,
                               rateLimitTier: creds.rateLimitTier,
@@ -131,20 +131,26 @@ final class ProfileStore {
     /// Make `email` the live Claude Code account: snapshot whatever is
     /// currently live, then write the profile's blob into the live keychain
     /// item and its identity into ~/.claude.json.
-    func switchTo(email: String) throws {
-        _ = try? captureCurrent()
+    func switchTo(email: String) async throws {
+        // A failed snapshot aborts the switch: overwriting the live item
+        // without a fresh copy of the outgoing account could lose its only
+        // valid refresh token. (A nil return — nobody logged in — is fine.)
+        _ = try await captureCurrent()
         guard let profile = profiles.first(where: { $0.email == email }) else {
             throw StoreError(message: "No saved profile for \(email)")
         }
-        guard let blob = try Keychain.read(service: CredentialBlob.profileService, account: email) else {
+        guard let blob = try await Keychain.read(service: CredentialBlob.profileService, account: email) else {
             throw StoreError(message: "No saved credentials for \(email) — log in once with `claude` and save again")
         }
-        try Keychain.upsertLive(service: CredentialBlob.liveService, data: blob)
+        try await Keychain.upsertLive(service: CredentialBlob.liveService, data: blob)
         try ClaudeConfig.setOauthAccount(profile.oauthAccount)
     }
 
-    func remove(email: String) throws {
-        try Keychain.delete(service: CredentialBlob.profileService, account: email)
+    func remove(email: String) async throws {
+        try await Keychain.delete(service: CredentialBlob.profileService, account: email)
+        // Clean up any staging item a crashed write left behind.
+        try? await Keychain.delete(service: CredentialBlob.profileService,
+                                   account: Keychain.stagingAccount(for: email))
         profiles.removeAll { $0.email == email }
         try save()
     }
@@ -152,18 +158,18 @@ final class ProfileStore {
     /// The credential blob to use for a profile — the live item for the
     /// active account (Claude Code keeps that one fresh), the saved copy
     /// otherwise.
-    func blob(for email: String, isActive: Bool) throws -> Data? {
-        if isActive, let live = try Keychain.read(service: CredentialBlob.liveService) {
+    func blob(for email: String, isActive: Bool) async throws -> Data? {
+        if isActive, let live = try await Keychain.read(service: CredentialBlob.liveService) {
             return live
         }
-        return try Keychain.read(service: CredentialBlob.profileService, account: email)
+        return try await Keychain.read(service: CredentialBlob.profileService, account: email)
     }
 
     /// Persist a blob whose tokens we refreshed ourselves.
-    func storeRefreshedBlob(_ data: Data, email: String, isActive: Bool) throws {
-        try Keychain.upsert(service: CredentialBlob.profileService, account: email, data: data)
+    func storeRefreshedBlob(_ data: Data, email: String, isActive: Bool) async throws {
+        try await Keychain.upsert(service: CredentialBlob.profileService, account: email, data: data)
         if isActive {
-            try Keychain.upsertLive(service: CredentialBlob.liveService, data: data)
+            try await Keychain.upsertLive(service: CredentialBlob.liveService, data: data)
         }
     }
 }

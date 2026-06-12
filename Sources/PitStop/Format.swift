@@ -1,14 +1,16 @@
 import Foundation
 
 enum Format {
+    // Templates rather than fixed formats so 24-hour locales aren't forced
+    // into "h:mm a".
     private static let time: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "h:mm a"
+        f.setLocalizedDateFormatFromTemplate("jmm")
         return f
     }()
     private static let day: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "EEE d MMM, h:mm a"
+        f.setLocalizedDateFormatFromTemplate("EEEdMMMjmm")
         return f
     }()
 
@@ -37,13 +39,13 @@ enum Format {
 
     static let updated: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "h:mm:ss a"
+        f.setLocalizedDateFormatFromTemplate("jmmss")
         return f
     }()
 
     private static let weekdayTime: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "EEE h:mm a"
+        f.setLocalizedDateFormatFromTemplate("EEEjmm")
         return f
     }()
 

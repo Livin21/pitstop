@@ -36,11 +36,15 @@ enum IndicatorMetric: String, CaseIterable {
         }
     }
 
-    func utilization(of report: UsageReport) -> Double {
+    /// nil = the pinned window is absent from the report (shows as "–",
+    /// not a misleading 0%).
+    func utilization(of report: UsageReport) -> Double? {
         switch self {
-        case .binding: return report.maxUtilization
-        case .fiveHour: return report.fiveHour?.utilization ?? 0
-        case .weekly: return report.sevenDay?.utilization ?? 0
+        case .binding:
+            return report.fiveHour?.utilization == nil && report.sevenDay?.utilization == nil
+                ? nil : report.maxUtilization
+        case .fiveHour: return report.fiveHour?.utilization
+        case .weekly: return report.sevenDay?.utilization
         }
     }
 }
@@ -63,6 +67,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastRefresh: Date?
     private var lastTopLevelError: String?
     private var refreshing = false
+    /// An explicit Refresh Now arrived while a refresh was in flight.
+    private var refreshQueued = false
+
+    private var isMenuOpen = false
+    /// The menu got in-place updates while open; rebuild on close to re-sort.
+    private var menuNeedsRebuildOnClose = false
+    /// The account rows currently in the menu, for in-place refresh.
+    private var accountRows: [(email: String, view: AccountRowView)] = []
+    private var updatedItem: NSMenuItem?
 
     /// 0 = below 80%, 1 = ≥80%, 2 = ≥95% — to notify once per crossing.
     private var notifiedBucket: [String: Int] = [:]
@@ -104,6 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func refreshNow(_ sender: Any?) {
         // Explicit refresh clears any backoff — the user asked for it.
         nextFetchAllowed.removeAll()
+        if refreshing {
+            refreshQueued = true
+            return
+        }
         refreshAll()
     }
 
@@ -111,12 +128,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !refreshing else { return }
         refreshing = true
         Task { @MainActor in
-            defer { refreshing = false }
+            defer {
+                refreshing = false
+                if refreshQueued {
+                    refreshQueued = false
+                    refreshAll()
+                }
+            }
             lastTopLevelError = nil
 
             // Keep the saved copy of the live account in sync.
             do {
-                try store.captureCurrent()
+                try await store.captureCurrent()
             } catch {
                 lastTopLevelError = error.localizedDescription
             }
@@ -145,6 +168,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         ?? min(120 * pow(2, Double(fails - 1)), 900)
                     nextFetchAllowed[email] = Date().addingTimeInterval(delay)
                     fetchError[email] = "Rate limited — retrying \(Format.relative(delay))"
+                } catch UsageAPI.APIError.unauthorized {
+                    failureCount[email] = (failureCount[email] ?? 0) + 1
+                    fetchError[email] = UsageAPI.APIError.unauthorized.localizedDescription
+                    // A rejected token won't heal on its own — don't hammer
+                    // the OAuth endpoint every cycle. Refresh Now (or a
+                    // re-login noticed by captureCurrent) clears this.
+                    nextFetchAllowed[email] = Date().addingTimeInterval(3600)
                 } catch {
                     failureCount[email] = (failureCount[email] ?? 0) + 1
                     fetchError[email] = error.localizedDescription
@@ -152,15 +182,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             lastRefresh = Date()
             updateStatusTitle()
-            buildMenu()
+            if !(isMenuOpen && refreshOpenMenuInPlace()) {
+                buildMenu()
+            }
             checkThresholds()
+        }
+    }
+
+    /// Update the rows of the open menu without rebuilding it, so hover
+    /// state and open submenus survive the periodic refresh. Row order is
+    /// frozen until the menu closes (no shuffling under the cursor); a
+    /// rebuild on close re-sorts. Returns false when the row set or row
+    /// heights changed — the caller falls back to a full rebuild.
+    private func refreshOpenMenuInPlace() -> Bool {
+        let sorted = sortedProfiles()
+        guard sorted.count == accountRows.count else { return false }
+        let models = sorted.map(rowModel(for:))
+        let current = Dictionary(uniqueKeysWithValues: accountRows.map { ($0.email, $0.view) })
+        for model in models {
+            guard let view = current[model.email],
+                  AccountRowView.height(for: model) == view.frame.height else { return false }
+        }
+        for model in models {
+            current[model.email]?.apply(model)
+        }
+        if let lastRefresh {
+            updatedItem?.attributedTitle = detailText(
+                "Updated \(Format.updated.string(from: lastRefresh)) · refreshes every 2 min")
+        }
+        menuNeedsRebuildOnClose = true
+        return true
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+        if menuNeedsRebuildOnClose {
+            menuNeedsRebuildOnClose = false
+            // Async so the clicked item (if any) delivers its action before
+            // the menu is torn down.
+            DispatchQueue.main.async { [weak self] in self?.buildMenu() }
         }
     }
 
     /// Returns non-expired credentials for a profile, refreshing via the
     /// OAuth refresh grant (and persisting the result) when needed.
     private func freshCredentials(for email: String, isActive: Bool) async throws -> OAuthCredentials {
-        guard let blob = try store.blob(for: email, isActive: isActive) else {
+        guard let blob = try await store.blob(for: email, isActive: isActive) else {
             throw ProfileStore.StoreError(message: "No stored credentials")
         }
         var creds = try CredentialBlob.parse(blob)
@@ -173,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                   accessToken: fresh.accessToken,
                                                   refreshToken: fresh.refreshToken,
                                                   expiresAtMs: fresh.expiresAtMs)
-        try store.storeRefreshedBlob(patched, email: email, isActive: isActive)
+        try await store.storeRefreshedBlob(patched, email: email, isActive: isActive)
         creds.accessToken = fresh.accessToken
         creds.refreshToken = fresh.refreshToken ?? creds.refreshToken
         creds.expiresAtMs = fresh.expiresAtMs
@@ -191,14 +262,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         let style = IndicatorStyle.current
         button.image = style == .percentOnly ? nil : statusSymbol
-        guard let email = activeEmail, let report = usage[email] else {
+        let report = activeEmail.flatMap { usage[$0] }
+        guard let email = activeEmail, let report,
+              let utilization = IndicatorMetric.current.utilization(of: report) else {
             button.contentTintColor = nil
             button.title = style == .iconOnly ? "" : " –"
-            button.toolTip = activeEmail.flatMap { fetchError[$0] }
-                ?? "PitStop — no usage data yet"
+            if let email = activeEmail, let report {
+                button.toolTip = statusTip(email: email, report: report)
+            } else {
+                button.toolTip = activeEmail.flatMap { fetchError[$0] }
+                    ?? "PitStop — no usage data yet"
+            }
             return
         }
-        let pct = Int(IndicatorMetric.current.utilization(of: report).rounded())
+        let pct = Int(utilization.rounded())
         let isStale = fetchError[email] != nil
         let color: NSColor = isStale ? .secondaryLabelColor
             : (pct >= 90 ? .systemRed : (pct >= 75 ? .systemOrange : .labelColor))
@@ -211,18 +288,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 .foregroundColor: color,
                 .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium),
             ])
+        button.toolTip = statusTip(email: email, report: report)
+    }
+
+    private func statusTip(email: String, report: UsageReport) -> String {
         var tip = "\(email)\n5-hour \(Format.percent(report.fiveHour?.utilization))"
             + " · weekly \(Format.percent(report.sevenDay?.utilization))"
         if let err = fetchError[email] {
             tip += "\n⚠️ \(err) — showing data from \(Format.updated.string(from: report.fetchedAt))"
         }
-        button.toolTip = tip
+        return tip
     }
 
     // MARK: - Menu
 
+    /// Active account first, then by headroom (emptiest next).
+    private func sortedProfiles() -> [Profile] {
+        store.profiles.sorted { a, b in
+            let aActive = a.email == activeEmail
+            let bActive = b.email == activeEmail
+            if aActive != bActive { return aActive }
+            return (usage[a.email]?.maxUtilization ?? 999)
+                < (usage[b.email]?.maxUtilization ?? 999)
+        }
+    }
+
     private func buildMenu() {
         menu.removeAllItems()
+        accountRows = []
+        updatedItem = nil
 
         menu.addItem(NSMenuItem.sectionHeader(title: "Claude Code Usage"))
 
@@ -230,19 +324,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             addDisabled("No accounts found — log in with `claude` first")
         }
 
-        // Active account first, then by headroom (emptiest next).
-        let sorted = store.profiles.sorted { a, b in
-            let aActive = a.email == activeEmail
-            let bActive = b.email == activeEmail
-            if aActive != bActive { return aActive }
-            return (usage[a.email]?.maxUtilization ?? 999)
-                < (usage[b.email]?.maxUtilization ?? 999)
-        }
-
-        for profile in sorted {
+        for profile in sortedProfiles() {
             let item = NSMenuItem()
-            item.view = AccountRowView(model: rowModel(for: profile))
+            let view = AccountRowView(model: rowModel(for: profile))
+            item.view = view
             menu.addItem(item)
+            accountRows.append((profile.email, view))
         }
 
         menu.addItem(.separator())
@@ -276,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(refresh)
 
         if let lastRefresh {
-            addDetail("Updated \(Format.updated.string(from: lastRefresh)) · refreshes every 2 min")
+            updatedItem = addDetail("Updated \(Format.updated.string(from: lastRefresh)) · refreshes every 2 min")
         }
         if let lastTopLevelError {
             addDetail("⚠️ \(lastTopLevelError)")
@@ -372,59 +459,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item)
     }
 
-    private func addDetail(_ text: String) {
-        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        item.indentationLevel = 1
-        item.attributedTitle = NSAttributedString(
+    private func detailText(_ text: String) -> NSAttributedString {
+        NSAttributedString(
             string: text,
             attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize,
                                                                  weight: .regular)])
+    }
+
+    @discardableResult
+    private func addDetail(_ text: String) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.indentationLevel = 1
+        item.attributedTitle = detailText(text)
         menu.addItem(item)
+        return item
     }
 
     // MARK: - Actions
 
     private func performSwitch(to email: String) {
-        do {
-            try store.switchTo(email: email)
-            activeEmail = email
-            notifiedBucket[email] = nil
-            Notifier.shared.post(
-                title: "Switched to \(email)",
-                body: "New Claude Code sessions use this account. Running sessions pick it up on their next token refresh.")
-            refreshAll()
-        } catch {
-            showError("Couldn't switch account", error)
+        Task {
+            do {
+                try await store.switchTo(email: email)
+                activeEmail = email
+                notifiedBucket[email] = nil
+                Notifier.shared.post(
+                    title: "Switched to \(email)",
+                    body: "New Claude Code sessions use this account. Running sessions pick it up on their next token refresh.")
+                refreshAll()
+            } catch {
+                showError("Couldn't switch account", error)
+            }
         }
     }
 
     @objc private func saveCurrent(_ sender: Any?) {
-        do {
-            if let profile = try store.captureCurrent() {
-                Notifier.shared.post(title: "Saved \(profile.email)",
-                                     body: "This account can now be switched to from PitStop.")
-            } else {
-                showError("Nothing to save",
-                          ProfileStore.StoreError(message: "No Claude Code login found. Run `claude` and log in first."))
+        Task {
+            do {
+                if let profile = try await store.captureCurrent() {
+                    Notifier.shared.post(title: "Saved \(profile.email)",
+                                         body: "This account can now be switched to from PitStop.")
+                } else {
+                    showError("Nothing to save",
+                              ProfileStore.StoreError(message: "No Claude Code login found. Run `claude` and log in first."))
+                }
+                refreshAll()
+            } catch {
+                showError("Couldn't save account", error)
             }
-            refreshAll()
-        } catch {
-            showError("Couldn't save account", error)
         }
     }
 
     @objc private func removeAccount(_ sender: NSMenuItem) {
         guard let email = sender.representedObject as? String else { return }
-        do {
-            try store.remove(email: email)
-            usage[email] = nil
-            fetchError[email] = nil
-            nextFetchAllowed[email] = nil
-            failureCount[email] = nil
-            buildMenu()
-        } catch {
-            showError("Couldn't remove account", error)
+        Task {
+            do {
+                try await store.remove(email: email)
+                usage[email] = nil
+                fetchError[email] = nil
+                nextFetchAllowed[email] = nil
+                failureCount[email] = nil
+                buildMenu()
+            } catch {
+                showError("Couldn't remove account", error)
+            }
         }
     }
 
