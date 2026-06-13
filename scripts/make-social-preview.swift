@@ -40,9 +40,11 @@ for row in 0..<2 {
     }
 }
 
-// Menu screenshot, right side (its own window shadow is baked in)
-let menuScale = 0.62
-let menuSize = NSSize(width: 930 * menuScale, height: 860 * menuScale)
+// Menu screenshot, right side (its own window shadow is baked in). Scale to a
+// target height so it's robust to the capture's exact pixel dimensions.
+let targetMenuHeight: CGFloat = 544
+let menuScale = targetMenuHeight / menu.size.height
+let menuSize = NSSize(width: menu.size.width * menuScale, height: targetMenuHeight)
 let menuRect = NSRect(x: CGFloat(width) - menuSize.width - 64,
                       y: 40 + (CGFloat(height) - 40 - menuSize.height) / 2,
                       width: menuSize.width, height: menuSize.height)
@@ -71,7 +73,7 @@ coral.setFill()
 NSBezierPath(roundedRect: NSRect(x: columnCenter - 70, y: 244, width: 140, height: 7),
              xRadius: 3.5, yRadius: 3.5).fill()
 
-let tagline = "Claude Code usage limits and one-click\naccount switching, in your Mac menu bar" as NSString
+let tagline = "Usage limits + one-click account switching\nfor Claude Code, Claude Desktop & Codex" as NSString
 tagline.draw(in: NSRect(x: columnCenter - 280, y: 132, width: 560, height: 92),
              withAttributes: [
                  .font: NSFont.systemFont(ofSize: 26, weight: .regular),
