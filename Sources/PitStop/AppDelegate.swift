@@ -49,20 +49,33 @@ enum IndicatorMetric: String, CaseIterable {
     }
 }
 
-/// One row in the menu. Accounts are keyed by email — the same account signed
-/// into both Claude Code and Claude Desktop is one shared usage pool, so it's
-/// one row. `source` records where PitStop found it and whether it can switch
-/// into it (Code accounts only; Desktop is observe-only).
+/// One row in the menu. Within a provider, accounts merge by email — the same
+/// Claude account signed into both Claude Code and Claude Desktop is one shared
+/// usage pool, so one row. Across providers they don't: a Claude and a Codex
+/// account can share an email yet be different services, so per-account state
+/// is keyed by `key` (provider-namespaced), not bare email.
 struct MenuAccount {
-    enum Source { case code, desktop, both }
+    enum Source { case code, desktop, both, codex }
     var email: String
     var source: Source
     var planLabel: String
     var isActive: Bool
     var profile: Profile?       // present for .code / .both
 
+    var isCodex: Bool { source == .codex }
+    /// Only Claude Code accounts can be switched into (they own the live
+    /// credential blob); Desktop and Codex are observe-only.
     var canSwitch: Bool { profile != nil }
-    var onDesktop: Bool { source != .code }
+    /// Storage key for usage/error/backoff dicts — namespaced by provider so a
+    /// Claude and a Codex account with the same email don't collide.
+    var key: String { isCodex ? "codex:\(email)" : email }
+    var sourceBadge: String? {
+        switch source {
+        case .code: return nil
+        case .desktop, .both: return "Desktop"
+        case .codex: return "Codex"
+        }
+    }
 }
 
 @MainActor
@@ -79,6 +92,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The account Claude Desktop is logged into, if any (read-only — PitStop
     /// can show its usage but can't switch it). Discovered on each refresh.
     private var desktopAccount: ClaudeDesktop.Account?
+    /// The OpenAI Codex account (CLI + app share one), if any — read-only.
+    private var codexAccount: Codex.Account?
+    /// Codex usage, keyed by the codex storage key ("codex:<email>").
+    private var codexUsage: [String: Codex.Usage] = [:]
     /// Last successful report per account — kept on fetch failure so the
     /// display degrades to stale data instead of going blank.
     private var usage: [String: UsageReport] = [:]
@@ -95,8 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isMenuOpen = false
     /// The menu got in-place updates while open; rebuild on close to re-sort.
     private var menuNeedsRebuildOnClose = false
-    /// The account rows currently in the menu, for in-place refresh.
-    private var accountRows: [(email: String, view: AccountRowView)] = []
+    /// The account rows currently in the menu, for in-place refresh
+    /// (keyed by the account's provider-namespaced storage key).
+    private var accountRows: [(key: String, view: AccountRowView)] = []
     private var updatedItem: NSMenuItem?
 
     /// 0 = below 80%, 1 = ≥80%, 2 = ≥95% — to notify once per crossing.
@@ -116,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func allEmails() -> [String] {
         var emails = store.profiles.map(\.email)
         if let d = desktopAccount, !emails.contains(d.email) { emails.append(d.email) }
+        if let c = codexAccount, !emails.contains(c.email) { emails.append(c.email) }
         return emails
     }
 
@@ -205,6 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             await refreshDesktopAccount()
+            await refreshCodexAccount()
 
             lastRefresh = Date()
             updateStatusTitle()
@@ -228,11 +248,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
+    /// Clear the error/backoff state for a key after a successful fetch.
+    private func clearFetchError(for key: String) {
+        fetchError[key] = nil
+        failureCount[key] = 0
+        nextFetchAllowed[key] = nil
+    }
+
     private func recordFetchSuccess(_ report: UsageReport, for email: String) {
         usage[email] = report
-        fetchError[email] = nil
-        failureCount[email] = 0
-        nextFetchAllowed[email] = nil
+        clearFetchError(for: email)
     }
 
     /// Translate a fetch failure into the stale-display state for `email`,
@@ -248,7 +273,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let delay = retryAfter ?? min(120 * pow(2, Double(fails - 1)), 900)
             nextFetchAllowed[email] = Date().addingTimeInterval(delay)
             fetchError[email] = "Rate limited"
-        case UsageAPI.APIError.unauthorized, ClaudeDesktop.DesktopError.sessionExpired:
+        case UsageAPI.APIError.unauthorized,
+             ClaudeDesktop.DesktopError.sessionExpired,
+             Codex.CodexError.sessionExpired:
             // A rejected token/session won't heal on its own — don't hammer
             // the endpoint every cycle. Refresh Now (or a re-login noticed on
             // the next pass) clears this.
@@ -287,6 +314,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Discover the OpenAI Codex account (CLI + app share `~/.codex/auth.json`)
+    /// and fetch its usage. Read-only and best-effort, mirroring Desktop.
+    private func refreshCodexAccount() async {
+        let knownKey = codexAccount.map { "codex:\($0.email)" }
+        guard knownKey.map(passedBackoffGate) ?? true else { return }
+        do {
+            guard let (account, usage) = try await Codex.poll() else {
+                codexAccount = nil
+                return
+            }
+            codexAccount = account
+            let key = "codex:\(account.email)"
+            codexUsage[key] = usage
+            clearFetchError(for: key)
+        } catch {
+            if let key = knownKey { recordFetchError(error, for: key) }
+        }
+    }
+
     /// Schedule a one-shot refresh for when the earliest active backoff
     /// expires, instead of letting the account idle until the next 2-min
     /// tick. Floored at 10 s so a tiny Retry-After can't turn into a hot
@@ -313,15 +359,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let sorted = sortedAccounts()
         guard sorted.count == accountRows.count else { return false }
         let models = sorted.map(rowModel(for:))
-        // Keyed by account email, not model.email — the latter may be a
-        // masked display address (--screenshot).
-        let current = Dictionary(uniqueKeysWithValues: accountRows.map { ($0.email, $0.view) })
+        // Keyed by the account's storage key, not its display email (which may
+        // be masked with --screenshot, or shared across providers).
+        let current = Dictionary(uniqueKeysWithValues: accountRows.map { ($0.key, $0.view) })
         for (account, model) in zip(sorted, models) {
-            guard let view = current[account.email],
+            guard let view = current[account.key],
                   AccountRowView.height(for: model) == view.frame.height else { return false }
         }
         for (account, model) in zip(sorted, models) {
-            current[account.email]?.apply(model)
+            current[account.key]?.apply(model)
         }
         if let lastRefresh {
             updatedItem?.attributedTitle = detailText(
@@ -418,8 +464,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu
 
-    /// All rows to show — saved Code profiles plus a Desktop-only account.
-    /// An account on both surfaces merges into one Code row tagged `.both`.
+    /// All rows to show — saved Code profiles, a Desktop-only Claude account,
+    /// and the Codex account. A Claude account on both Code and Desktop merges
+    /// into one row tagged `.both`; Codex is always its own row (different
+    /// provider, even when it shares an email).
     private func accountsForMenu() -> [MenuAccount] {
         var rows = store.profiles.map { profile -> MenuAccount in
             let onDesktop = desktopAccount?.email == profile.email
@@ -434,15 +482,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rows.append(MenuAccount(email: d.email, source: .desktop,
                                     planLabel: d.planLabel, isActive: false, profile: nil))
         }
+        if let c = codexAccount {
+            rows.append(MenuAccount(email: c.email, source: .codex,
+                                    planLabel: c.planLabel, isActive: false, profile: nil))
+        }
         return rows
+    }
+
+    /// The headroom (max window utilization) for an account, from whichever
+    /// provider's usage store holds it. 999 = unknown, so it sorts last.
+    private func headroom(_ account: MenuAccount) -> Double {
+        if account.isCodex { return codexUsage[account.key]?.maxUtilization ?? 999 }
+        return usage[account.key]?.maxUtilization ?? 999
+    }
+
+    /// Section header naming whichever providers are present.
+    private func usageHeaderTitle() -> String {
+        let hasClaude = !store.profiles.isEmpty || desktopAccount != nil
+        let claudeLabel = desktopAccount == nil ? "Claude Code" : "Claude"
+        switch (hasClaude, codexAccount != nil) {
+        case (true, true): return "\(claudeLabel) & Codex Usage"
+        case (false, true): return "Codex Usage"
+        default: return "\(claudeLabel) Usage"
+        }
     }
 
     /// Active account first, then by headroom (emptiest next).
     private func sortedAccounts() -> [MenuAccount] {
         accountsForMenu().sorted { a, b in
             if a.isActive != b.isActive { return a.isActive }
-            return (usage[a.email]?.maxUtilization ?? 999)
-                < (usage[b.email]?.maxUtilization ?? 999)
+            return headroom(a) < headroom(b)
         }
     }
 
@@ -452,9 +521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updatedItem = nil
 
         let accounts = sortedAccounts()
-        // "Claude Code Usage" unless a Desktop account is in the mix.
-        menu.addItem(NSMenuItem.sectionHeader(
-            title: desktopAccount == nil ? "Claude Code Usage" : "Claude Usage"))
+        menu.addItem(NSMenuItem.sectionHeader(title: usageHeaderTitle()))
 
         if accounts.isEmpty {
             addDisabled("No accounts found — log in with `claude` first")
@@ -465,7 +532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let view = AccountRowView(model: rowModel(for: account))
             item.view = view
             menu.addItem(item)
-            accountRows.append((account.email, view))
+            accountRows.append((account.key, view))
         }
 
         menu.addItem(.separator())
@@ -547,51 +614,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    /// Assemble the display model for one account row.
+    /// Assemble the display model for one account row. Bars and extras differ
+    /// by provider (Anthropic 5h/7d + Opus/Sonnet vs Codex's generic windows);
+    /// the stale/error/loading status line is shared via the storage key.
     private func rowModel(for account: MenuAccount) -> AccountRowView.Model {
         let email = account.email
-        let report = usage[email]
-        let bars: [AccountRowView.BarRow] = [
-            .init(label: "5h", utilization: report?.fiveHour?.utilization,
-                  resetText: Format.compactReset(report?.fiveHour?.resetsAt)),
-            .init(label: "7d", utilization: report?.sevenDay?.utilization,
-                  resetText: Format.compactReset(report?.sevenDay?.resetsAt)),
-        ]
-
+        let key = account.key
+        let bars: [AccountRowView.BarRow]
         var extras: [String] = []
-        if let v = report?.sevenDayOpus?.utilization, v > 0 {
-            extras.append("Opus wk \(Format.percent(v))")
-        }
-        if let v = report?.sevenDaySonnet?.utilization, v > 0 {
-            extras.append("Sonnet wk \(Format.percent(v))")
-        }
-        if let r = report, r.extraUsageEnabled {
-            extras.append("Extra \(Format.percent(r.extraUsageUtilization))")
+        let dataDate: Date?
+
+        if account.isCodex {
+            let cu = codexUsage[key]
+            bars = (cu?.windows ?? []).map {
+                .init(label: $0.label, utilization: $0.usedPercent,
+                      resetText: Format.compactReset($0.resetsAt))
+            }
+            dataDate = cu?.fetchedAt
+        } else {
+            let report = usage[key]
+            bars = [
+                .init(label: "5h", utilization: report?.fiveHour?.utilization,
+                      resetText: Format.compactReset(report?.fiveHour?.resetsAt)),
+                .init(label: "7d", utilization: report?.sevenDay?.utilization,
+                      resetText: Format.compactReset(report?.sevenDay?.resetsAt)),
+            ]
+            if let v = report?.sevenDayOpus?.utilization, v > 0 {
+                extras.append("Opus wk \(Format.percent(v))")
+            }
+            if let v = report?.sevenDaySonnet?.utilization, v > 0 {
+                extras.append("Sonnet wk \(Format.percent(v))")
+            }
+            if let r = report, r.extraUsageEnabled {
+                extras.append("Extra \(Format.percent(r.extraUsageUtilization))")
+            }
+            dataDate = report?.fetchedAt
         }
 
         var status: String?
-        if let err = fetchError[email] {
+        if let err = fetchError[key] {
             var text = err
-            if let until = nextFetchAllowed[email] {
+            if let until = nextFetchAllowed[key] {
                 let remaining = until.timeIntervalSinceNow
                 text += remaining > 1
                     ? " — retrying \(Format.relative(remaining))"
                     : " — retrying on next refresh"
             }
-            status = report.map {
-                "⚠︎ \(text) · showing \(Format.updated.string(from: $0.fetchedAt)) data"
+            status = dataDate.map {
+                "⚠︎ \(text) · showing \(Format.updated.string(from: $0)) data"
             } ?? "⚠︎ \(text)"
-        } else if report == nil {
+        } else if dataDate == nil {
             status = "Loading…"
         }
 
-        // Only Code accounts can be switched into; Desktop is observe-only.
         let canSwitch = account.canSwitch && !account.isActive
         return AccountRowView.Model(
             email: displayEmail(email),
             planLabel: account.planLabel,
             isActive: account.isActive,
-            sourceBadge: account.onDesktop ? "Desktop" : nil,
+            sourceBadge: account.sourceBadge,
             bars: bars,
             modelsLine: extras.isEmpty ? nil : extras.joined(separator: " · "),
             statusLine: status,

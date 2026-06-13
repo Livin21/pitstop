@@ -24,6 +24,11 @@ that account shows up too — tagged **Desktop**, read-only (PitStop can watch
 its usage but can't switch it). One account signed into both Claude Code and
 Claude Desktop is a single shared usage pool, so it stays a single row.
 
+**OpenAI Codex** appears the same way, tagged **Codex** and read-only — its
+usage read from the local Codex login (`~/.codex/auth.json`, shared by the
+Codex CLI and the Codex app, so it's one row). Each plan's rate-limit windows
+render as bars just like Claude's 5-hour and weekly limits.
+
 ## Quickstart
 
 Using an AI agent? Copy this prompt into Claude Code (or any agent that can
@@ -99,6 +104,13 @@ Or set it up manually:
   which happens to return the same shape as the OAuth one. PitStop never
   writes to Claude Desktop's data; you can't switch a Desktop account from
   PitStop (its login lives in that app).
+- **OpenAI Codex** is read from `~/.codex/auth.json` — the ChatGPT OAuth token
+  the Codex CLI and Codex app both use — and its usage from
+  `chatgpt.com/backend-api/codex/usage`, a cheap metadata call returning each
+  rate-limit window's used-percent and reset time. Read-only; PitStop never
+  writes that file. Because the CLI and app share one login, Codex is one row.
+  Per-account state is keyed by provider, so a Claude account and a Codex
+  account that happen to share an email stay distinct rows.
 - **All keychain access goes through `/usr/bin/security`** — the same CLI
   Claude Code shells out to. One "Always Allow" grant (enter the keychain
   password when prompted) covers both apps and survives PitStop rebuilds,
@@ -169,5 +181,11 @@ swift scripts/make-icon.swift
   endpoints with the desktop app's own session; if those change, update
   `ClaudeDesktop.swift`. If Claude Desktop isn't installed or isn't signed
   in, nothing changes.
+- **Codex** uses the access token already in `~/.codex/auth.json` as-is —
+  PitStop doesn't refresh it (Codex keeps it fresh on use), so if you haven't
+  run Codex in a while the token can go stale and the row says so until you
+  next use Codex. No keychain prompt (it's a plain file). It reads ChatGPT's
+  unofficial backend; if that changes, update `Codex.swift`. Not installed or
+  not signed in → nothing changes.
 - The usage endpoint and refresh flow are the same unofficial OAuth surface
   Claude Code itself uses; if Anthropic changes them, update `UsageAPI.swift`.

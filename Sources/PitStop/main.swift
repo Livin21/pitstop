@@ -56,6 +56,21 @@ if CommandLine.arguments.contains("--check") {
         } catch {
             print("\nClaude Desktop: \(error.localizedDescription)")
         }
+
+        // Codex (CLI + app share ~/.codex/auth.json; observe-only).
+        do {
+            if let (acct, usage) = try await Codex.poll() {
+                print("\n▣ \(acct.email)  [\(acct.planLabel)]  · Codex")
+                if usage.windows.isEmpty { print("   (no usage windows reported)") }
+                for w in usage.windows {
+                    print("   \(w.label.isEmpty ? "window" : w.label)  \(Format.percent(w.usedPercent))  \(Format.reset(w.resetsAt))")
+                }
+            } else if Codex.isPresent {
+                print("\nCodex: installed but not signed in with a ChatGPT account")
+            }
+        } catch {
+            print("\nCodex: \(error.localizedDescription)")
+        }
     }
     semaphore.wait()
     exit(0)
@@ -91,6 +106,11 @@ if CommandLine.arguments.contains("--preview") {
                   planLabel: "Max · 20x", isActive: false, sourceBadge: "Desktop",
                   bars: [.init(label: "5h", utilization: 12, resetText: Format.compactReset(tonight)),
                          .init(label: "7d", utilization: 41, resetText: Format.compactReset(nextWeek))],
+                  modelsLine: nil, statusLine: nil, onSwitch: nil),
+            .init(email: "codex@example.com",
+                  planLabel: "Go", isActive: false, sourceBadge: "Codex",
+                  bars: [.init(label: "30d", utilization: 20,
+                               resetText: Format.compactReset(nextWeek))],
                   modelsLine: nil, statusLine: nil, onSwitch: nil),
         ]
         // Middle row rendered in its hover state to preview the Switch pill.
