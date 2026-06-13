@@ -49,6 +49,22 @@ enum IndicatorMetric: String, CaseIterable {
     }
 }
 
+/// One row in the menu. Accounts are keyed by email — the same account signed
+/// into both Claude Code and Claude Desktop is one shared usage pool, so it's
+/// one row. `source` records where PitStop found it and whether it can switch
+/// into it (Code accounts only; Desktop is observe-only).
+struct MenuAccount {
+    enum Source { case code, desktop, both }
+    var email: String
+    var source: Source
+    var planLabel: String
+    var isActive: Bool
+    var profile: Profile?       // present for .code / .both
+
+    var canSwitch: Bool { profile != nil }
+    var onDesktop: Bool { source != .code }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
@@ -60,6 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let store = ProfileStore()
     private var activeEmail: String?
+    /// The account Claude Desktop is logged into, if any (read-only — PitStop
+    /// can show its usage but can't switch it). Discovered on each refresh.
+    private var desktopAccount: ClaudeDesktop.Account?
     /// Last successful report per account — kept on fetch failure so the
     /// display degrades to stale data instead of going blank.
     private var usage: [String: UsageReport] = [:]
@@ -92,10 +111,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Run: /Applications/PitStop.app/Contents/MacOS/PitStop --screenshot
     private let maskEmails = CommandLine.arguments.contains("--screenshot")
 
+    /// Every distinct account email PitStop knows — saved Code profiles plus
+    /// a Desktop-only account — for stable masking and iteration.
+    private func allEmails() -> [String] {
+        var emails = store.profiles.map(\.email)
+        if let d = desktopAccount, !emails.contains(d.email) { emails.append(d.email) }
+        return emails
+    }
+
     private func displayEmail(_ email: String) -> String {
         guard maskEmails else { return email }
         let masks = ["asha@work.com", "personal@example.com", "side@example.com"]
-        let i = store.profiles.map(\.email).sorted().firstIndex(of: email) ?? 0
+        let i = allEmails().sorted().firstIndex(of: email) ?? 0
         return i < masks.count ? masks[i] : "account\(i + 1)@example.com"
     }
 
@@ -165,49 +192,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             store.load()
             activeEmail = ClaudeConfig.activeEmail()
 
-            for profile in store.profiles {
+            for profile in store.profiles where passedBackoffGate(profile.email) {
                 let email = profile.email
-                if let notBefore = nextFetchAllowed[email] {
-                    if Date() < notBefore {
-                        continue // still backing off; keep showing stale data
-                    }
-                    // Gate passed — clear it now so entries are always
-                    // future-dated or absent (menuNeedsUpdate's retryDue
-                    // check relies on that); the attempt below sets a new
-                    // one if needed.
-                    nextFetchAllowed[email] = nil
-                }
                 do {
                     let creds = try await freshCredentials(for: email,
                                                            isActive: email == activeEmail)
                     let report = try await UsageAPI.fetchUsage(accessToken: creds.accessToken)
-                    usage[email] = report
-                    fetchError[email] = nil
-                    failureCount[email] = 0
-                    nextFetchAllowed[email] = nil
-                } catch UsageAPI.APIError.rateLimited(let retryAfter) {
-                    let fails = (failureCount[email] ?? 0) + 1
-                    failureCount[email] = fails
-                    // Respect Retry-After; otherwise exponential backoff
-                    // 2 min → 4 min → … capped at 15 min.
-                    let delay = retryAfter
-                        ?? min(120 * pow(2, Double(fails - 1)), 900)
-                    // Retry timing is rendered from nextFetchAllowed at
-                    // display time, so it doesn't go stale in the menu.
-                    nextFetchAllowed[email] = Date().addingTimeInterval(delay)
-                    fetchError[email] = "Rate limited"
-                } catch UsageAPI.APIError.unauthorized {
-                    failureCount[email] = (failureCount[email] ?? 0) + 1
-                    fetchError[email] = UsageAPI.APIError.unauthorized.localizedDescription
-                    // A rejected token won't heal on its own — don't hammer
-                    // the OAuth endpoint every cycle. Refresh Now (or a
-                    // re-login noticed by captureCurrent) clears this.
-                    nextFetchAllowed[email] = Date().addingTimeInterval(3600)
+                    recordFetchSuccess(report, for: email)
                 } catch {
-                    failureCount[email] = (failureCount[email] ?? 0) + 1
-                    fetchError[email] = error.localizedDescription
+                    recordFetchError(error, for: email)
                 }
             }
+
+            await refreshDesktopAccount()
+
             lastRefresh = Date()
             updateStatusTitle()
             if !(isMenuOpen && refreshOpenMenuInPlace()) {
@@ -215,6 +213,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             checkThresholds()
             scheduleBackoffRetry()
+        }
+    }
+
+    /// True if `email` is clear to fetch. A future-dated backoff returns false
+    /// (keep showing stale data); a passed gate is cleared so entries are
+    /// always future-dated or absent — `menuNeedsUpdate`'s retryDue check
+    /// relies on that.
+    private func passedBackoffGate(_ email: String) -> Bool {
+        if let notBefore = nextFetchAllowed[email] {
+            if Date() < notBefore { return false }
+            nextFetchAllowed[email] = nil
+        }
+        return true
+    }
+
+    private func recordFetchSuccess(_ report: UsageReport, for email: String) {
+        usage[email] = report
+        fetchError[email] = nil
+        failureCount[email] = 0
+        nextFetchAllowed[email] = nil
+    }
+
+    /// Translate a fetch failure into the stale-display state for `email`,
+    /// shared by the Code (OAuth) and Desktop (claude.ai) fetch paths.
+    private func recordFetchError(_ error: Error, for email: String) {
+        let fails = (failureCount[email] ?? 0) + 1
+        failureCount[email] = fails
+        switch error {
+        case UsageAPI.APIError.rateLimited(let retryAfter):
+            // Respect Retry-After; otherwise exponential backoff
+            // 2 min → 4 min → … capped at 15 min. Retry timing is rendered
+            // from nextFetchAllowed at display time so it never goes stale.
+            let delay = retryAfter ?? min(120 * pow(2, Double(fails - 1)), 900)
+            nextFetchAllowed[email] = Date().addingTimeInterval(delay)
+            fetchError[email] = "Rate limited"
+        case UsageAPI.APIError.unauthorized, ClaudeDesktop.DesktopError.sessionExpired:
+            // A rejected token/session won't heal on its own — don't hammer
+            // the endpoint every cycle. Refresh Now (or a re-login noticed on
+            // the next pass) clears this.
+            nextFetchAllowed[email] = Date().addingTimeInterval(3600)
+            fetchError[email] = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+        default:
+            fetchError[email] = error.localizedDescription
+        }
+    }
+
+    /// Discover the Claude Desktop account and fetch its usage. Best-effort:
+    /// a missing/not-signed-in Desktop just clears the account; a fetch error
+    /// keeps the last-known identity and shows the error on its row. Skipped
+    /// entirely if PitStop already tracks that email as a Code profile (same
+    /// account, same shared usage — the Code path already fetched it).
+    private func refreshDesktopAccount() async {
+        let knownEmail = desktopAccount?.email
+        guard knownEmail.map(passedBackoffGate) ?? true else { return }
+        do {
+            guard let (account, report) = try await ClaudeDesktop.poll() else {
+                desktopAccount = nil
+                return
+            }
+            desktopAccount = account
+            if !store.profiles.contains(where: { $0.email == account.email }) {
+                recordFetchSuccess(report, for: account.email)
+            }
+        } catch {
+            // Keep the last-known identity so the row doesn't flicker out;
+            // surface the error on it (unless a Code profile owns the email).
+            if let email = knownEmail,
+               !store.profiles.contains(where: { $0.email == email }) {
+                recordFetchError(error, for: email)
+            }
         }
     }
 
@@ -241,18 +310,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// rebuild on close re-sorts. Returns false when the row set or row
     /// heights changed — the caller falls back to a full rebuild.
     private func refreshOpenMenuInPlace() -> Bool {
-        let sorted = sortedProfiles()
+        let sorted = sortedAccounts()
         guard sorted.count == accountRows.count else { return false }
         let models = sorted.map(rowModel(for:))
-        // Keyed by profile email, not model.email — the latter may be a
+        // Keyed by account email, not model.email — the latter may be a
         // masked display address (--screenshot).
         let current = Dictionary(uniqueKeysWithValues: accountRows.map { ($0.email, $0.view) })
-        for (profile, model) in zip(sorted, models) {
-            guard let view = current[profile.email],
+        for (account, model) in zip(sorted, models) {
+            guard let view = current[account.email],
                   AccountRowView.height(for: model) == view.frame.height else { return false }
         }
-        for (profile, model) in zip(sorted, models) {
-            current[profile.email]?.apply(model)
+        for (account, model) in zip(sorted, models) {
+            current[account.email]?.apply(model)
         }
         if let lastRefresh {
             updatedItem?.attributedTitle = detailText(
@@ -349,12 +418,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu
 
+    /// All rows to show — saved Code profiles plus a Desktop-only account.
+    /// An account on both surfaces merges into one Code row tagged `.both`.
+    private func accountsForMenu() -> [MenuAccount] {
+        var rows = store.profiles.map { profile -> MenuAccount in
+            let onDesktop = desktopAccount?.email == profile.email
+            return MenuAccount(email: profile.email,
+                               source: onDesktop ? .both : .code,
+                               planLabel: profile.planLabel,
+                               isActive: profile.email == activeEmail,
+                               profile: profile)
+        }
+        if let d = desktopAccount,
+           !store.profiles.contains(where: { $0.email == d.email }) {
+            rows.append(MenuAccount(email: d.email, source: .desktop,
+                                    planLabel: d.planLabel, isActive: false, profile: nil))
+        }
+        return rows
+    }
+
     /// Active account first, then by headroom (emptiest next).
-    private func sortedProfiles() -> [Profile] {
-        store.profiles.sorted { a, b in
-            let aActive = a.email == activeEmail
-            let bActive = b.email == activeEmail
-            if aActive != bActive { return aActive }
+    private func sortedAccounts() -> [MenuAccount] {
+        accountsForMenu().sorted { a, b in
+            if a.isActive != b.isActive { return a.isActive }
             return (usage[a.email]?.maxUtilization ?? 999)
                 < (usage[b.email]?.maxUtilization ?? 999)
         }
@@ -365,18 +451,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         accountRows = []
         updatedItem = nil
 
-        menu.addItem(NSMenuItem.sectionHeader(title: "Claude Code Usage"))
+        let accounts = sortedAccounts()
+        // "Claude Code Usage" unless a Desktop account is in the mix.
+        menu.addItem(NSMenuItem.sectionHeader(
+            title: desktopAccount == nil ? "Claude Code Usage" : "Claude Usage"))
 
-        if store.profiles.isEmpty {
+        if accounts.isEmpty {
             addDisabled("No accounts found — log in with `claude` first")
         }
 
-        for profile in sortedProfiles() {
+        for account in accounts {
             let item = NSMenuItem()
-            let view = AccountRowView(model: rowModel(for: profile))
+            let view = AccountRowView(model: rowModel(for: account))
             item.view = view
             menu.addItem(item)
-            accountRows.append((profile.email, view))
+            accountRows.append((account.email, view))
         }
 
         menu.addItem(.separator())
@@ -459,8 +548,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Assemble the display model for one account row.
-    private func rowModel(for profile: Profile) -> AccountRowView.Model {
-        let email = profile.email
+    private func rowModel(for account: MenuAccount) -> AccountRowView.Model {
+        let email = account.email
         let report = usage[email]
         let bars: [AccountRowView.BarRow] = [
             .init(label: "5h", utilization: report?.fiveHour?.utilization,
@@ -496,15 +585,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Loading…"
         }
 
-        let isActive = email == activeEmail
+        // Only Code accounts can be switched into; Desktop is observe-only.
+        let canSwitch = account.canSwitch && !account.isActive
         return AccountRowView.Model(
             email: displayEmail(email),
-            planLabel: profile.planLabel,
-            isActive: isActive,
+            planLabel: account.planLabel,
+            isActive: account.isActive,
+            sourceBadge: account.onDesktop ? "Desktop" : nil,
             bars: bars,
             modelsLine: extras.isEmpty ? nil : extras.joined(separator: " · "),
             statusLine: status,
-            onSwitch: isActive ? nil : { [weak self] in self?.performSwitch(to: email) })
+            onSwitch: canSwitch ? { [weak self] in self?.performSwitch(to: email) } : nil)
     }
 
     private func addDisabled(_ text: String) {

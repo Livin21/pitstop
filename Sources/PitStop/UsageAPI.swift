@@ -73,10 +73,16 @@ enum UsageAPI {
             throw APIError.rateLimited(retryAfter: retryAfter)
         }
         guard http.statusCode == 200 else { throw APIError.http(http.statusCode) }
+        return try parse(data)
+    }
+
+    /// Parse a usage payload. The OAuth endpoint (`api.anthropic.com`) and the
+    /// claude.ai web endpoint Claude Desktop uses return the same shape, so
+    /// both fetch paths share this.
+    static func parse(_ data: Data) throws -> UsageReport {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw APIError.malformed
         }
-
         var report = UsageReport()
         report.fiveHour = window(root["five_hour"])
         report.sevenDay = window(root["seven_day"])

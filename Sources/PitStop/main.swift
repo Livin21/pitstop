@@ -41,6 +41,21 @@ if CommandLine.arguments.contains("--check") {
                 print("   error: \(error.localizedDescription)")
             }
         }
+
+        // Claude Desktop (observe-only — its claude.ai session).
+        do {
+            if let (acct, report) = try await ClaudeDesktop.poll() {
+                let dup = store.profiles.contains { $0.email == acct.email }
+                    ? "  (also a saved Code account)" : ""
+                print("\n▣ \(acct.email)  [\(acct.planLabel)]  · Desktop\(dup)")
+                print("   5-hour  \(Format.percent(report.fiveHour?.utilization))  \(Format.reset(report.fiveHour?.resetsAt))")
+                print("   weekly  \(Format.percent(report.sevenDay?.utilization))  \(Format.reset(report.sevenDay?.resetsAt))")
+            } else if ClaudeDesktop.isPresent {
+                print("\nClaude Desktop: installed but not signed in")
+            }
+        } catch {
+            print("\nClaude Desktop: \(error.localizedDescription)")
+        }
     }
     semaphore.wait()
     exit(0)
@@ -72,6 +87,11 @@ if CommandLine.arguments.contains("--preview") {
                   modelsLine: "Sonnet wk 10%",
                   statusLine: "⚠︎ Rate limited — retrying in 4m · showing 6:01 PM data",
                   onSwitch: {}),
+            .init(email: "desktop@example.com",
+                  planLabel: "Max · 20x", isActive: false, sourceBadge: "Desktop",
+                  bars: [.init(label: "5h", utilization: 12, resetText: Format.compactReset(tonight)),
+                         .init(label: "7d", utilization: 41, resetText: Format.compactReset(nextWeek))],
+                  modelsLine: nil, statusLine: nil, onSwitch: nil),
         ]
         // Middle row rendered in its hover state to preview the Switch pill.
         let views = models.enumerated().map { i, m in

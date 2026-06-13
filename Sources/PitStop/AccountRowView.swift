@@ -15,6 +15,7 @@ final class AccountRowView: NSView {
         var email: String
         var planLabel: String
         var isActive: Bool
+        var sourceBadge: String? = nil  // e.g. "Desktop" — a quiet source tag
         var bars: [BarRow]
         var modelsLine: String?    // "Opus wk 12% · Sonnet wk 10%"
         var statusLine: String?    // error / stale / loading info
@@ -126,6 +127,24 @@ final class AccountRowView: NSView {
                               .font: chipFont,
                               .foregroundColor: switching ? NSColor.white : .secondaryLabelColor,
                           ])
+            emailMaxX = chip.minX - 8
+        }
+
+        // Source tag (e.g. "Desktop"), an outlined chip left of the plan chip.
+        if let badge = model.sourceBadge {
+            let badgeFont = NSFont.systemFont(ofSize: 9.5, weight: .medium)
+            let textSize = badge.size(withAttributes: [.font: badgeFont])
+            let chip = NSRect(x: emailMaxX - textSize.width - 12, y: y,
+                              width: textSize.width + 12, height: 16)
+            let path = NSBezierPath(roundedRect: chip, xRadius: 8, yRadius: 8)
+            NSColor.labelColor.withAlphaComponent(0.04).setFill()
+            path.fill()
+            NSColor.labelColor.withAlphaComponent(0.18).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            badge.draw(at: NSPoint(x: chip.minX + 6, y: chip.minY + 2),
+                       withAttributes: [.font: badgeFont,
+                                        .foregroundColor: NSColor.tertiaryLabelColor])
             emailMaxX = chip.minX - 8
         }
 

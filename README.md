@@ -19,6 +19,11 @@ active-first, then by headroom (the emptiest account next — the one you'd
 switch to). The menu bar shows the active account's binding limit,
 color-coded.
 
+If you also use the **Claude Desktop** app signed into a *different* account,
+that account shows up too — tagged **Desktop**, read-only (PitStop can watch
+its usage but can't switch it). One account signed into both Claude Code and
+Claude Desktop is a single shared usage pool, so it stays a single row.
+
 ## Quickstart
 
 Using an AI agent? Copy this prompt into Claude Code (or any agent that can
@@ -38,7 +43,9 @@ Claude accounts, on this Mac.
    them instead: when PitStop first reads the Claude Code credentials,
    macOS may ask for my login keychain password. I'll enter it and click
    "Always Allow" (plain "Allow" makes the prompt come back). The grant
-   is one-time; it survives rebuilds.
+   is one-time; it survives rebuilds. If I use the Claude Desktop app too,
+   a second identical prompt may appear for "Claude Safe Storage" (so
+   PitStop can show that account's usage) — same deal, Always Allow.
 4. Verify: a checkered-flag icon appears in the menu bar showing my
    usage percentage, and `.build/release/PitStop --check` prints my
    account with live usage numbers.
@@ -84,6 +91,14 @@ Or set it up manually:
     per account email) — never written to disk;
   - non-secret identity (email, org, plan) lives in
     `~/.config/pitstop/profiles.json`.
+- **Claude Desktop** (the chat app) is read separately and read-only. It
+  signs into claude.ai with a cookie session rather than the OAuth token
+  Claude Code uses, so PitStop decrypts that app's `sessionKey` cookie
+  (Chromium AES, keyed by the `Claude Safe Storage` keychain item, read
+  through the same `security` path) and calls claude.ai's usage endpoint —
+  which happens to return the same shape as the OAuth one. PitStop never
+  writes to Claude Desktop's data; you can't switch a Desktop account from
+  PitStop (its login lives in that app).
 - **All keychain access goes through `/usr/bin/security`** — the same CLI
   Claude Code shells out to. One "Always Allow" grant (enter the keychain
   password when prompted) covers both apps and survives PitStop rebuilds,
@@ -147,5 +162,12 @@ swift scripts/make-icon.swift
   changed, but the file is re-serialized). Claude Code rewrites this file
   constantly itself; a concurrent write race is theoretically possible but
   the window is milliseconds.
+- **Claude Desktop** support adds one more one-time keychain grant: the first
+  time PitStop reads the `Claude Safe Storage` item (to decrypt that app's
+  session cookie), macOS prompts — enter the password and click **Always
+  Allow**, same as the credentials grant. It reads claude.ai's unofficial web
+  endpoints with the desktop app's own session; if those change, update
+  `ClaudeDesktop.swift`. If Claude Desktop isn't installed or isn't signed
+  in, nothing changes.
 - The usage endpoint and refresh flow are the same unofficial OAuth surface
   Claude Code itself uses; if Anthropic changes them, update `UsageAPI.swift`.
