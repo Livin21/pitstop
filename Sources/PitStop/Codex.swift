@@ -44,7 +44,7 @@ enum Codex {
         case notSignedIn
         var errorDescription: String? {
             switch self {
-            case .sessionExpired: return "Codex token expired — run `codex` to refresh"
+            case .sessionExpired: return "Codex token expired — switch to refresh it"
             case .malformed: return "Unexpected Codex usage response"
             case .notSignedIn: return "Not signed in to Codex with a ChatGPT account"
             }

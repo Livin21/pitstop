@@ -109,6 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// display degrades to stale data instead of going blank.
     private var usage: [String: UsageReport] = [:]
     private var fetchError: [String: String] = [:]
+    /// Keys whose error needs the user to act (re-auth / switch) rather than
+    /// just waiting — so the row doesn't promise a "retrying in …" that can't
+    /// actually recover on its own.
+    private var needsAction: Set<String> = []
     /// Backoff: don't hit the endpoint for this account before this date.
     private var nextFetchAllowed: [String: Date] = [:]
     private var failureCount: [String: Int] = [:]
@@ -262,6 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fetchError[key] = nil
         failureCount[key] = 0
         nextFetchAllowed[key] = nil
+        needsAction.remove(key)
     }
 
     private func recordFetchSuccess(_ report: UsageReport, for email: String) {
@@ -282,17 +287,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let delay = retryAfter ?? min(120 * pow(2, Double(fails - 1)), 900)
             nextFetchAllowed[email] = Date().addingTimeInterval(delay)
             fetchError[email] = "Rate limited"
+            needsAction.remove(email)
         case UsageAPI.APIError.unauthorized,
              ClaudeDesktop.DesktopError.sessionExpired,
              Codex.CodexError.sessionExpired:
             // A rejected token/session won't heal on its own — don't hammer
             // the endpoint every cycle. Refresh Now (or a re-login noticed on
-            // the next pass) clears this.
+            // the next pass) clears this. It needs the user to act, so the row
+            // shows the message without a misleading "retrying in …".
             nextFetchAllowed[email] = Date().addingTimeInterval(3600)
             fetchError[email] = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
+            needsAction.insert(email)
         default:
             fetchError[email] = error.localizedDescription
+            needsAction.remove(email)
         }
     }
 
@@ -686,7 +695,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var status: String?
         if let err = fetchError[key] {
             var text = err
-            if let until = nextFetchAllowed[key] {
+            // Only promise a retry for backoff errors (rate limits) that will
+            // recover on their own — not for ones needing the user to act.
+            if let until = nextFetchAllowed[key], !needsAction.contains(key) {
                 let remaining = until.timeIntervalSinceNow
                 text += remaining > 1
                     ? " — retrying \(Format.relative(remaining))"
