@@ -4,13 +4,13 @@
 
 # PitStop
 
-macOS menu bar app that shows your Claude Code account's **usage limits** and
-lets you **switch between Claude accounts** with one click — so when one
-account hits its 5-hour or weekly rate limit, you flip to another and your
-work keeps going.
+macOS menu bar app that tracks **usage limits** across your AI coding accounts
+— **Claude Code**, **Claude Desktop**, and **OpenAI Codex** — and lets you
+**switch accounts** with one click, so when one hits its rate limit you flip to
+another and your work keeps going.
 
 <p align="center">
-  <img src="docs/menu.png" width="465" alt="PitStop menu: two accounts with color-coded usage bars">
+  <img src="docs/menu.png" width="465" alt="PitStop menu grouped into Claude and Codex sections, each with color-coded usage bars">
 </p>
 
 Accounts are grouped into a section per provider — **Claude**, **Codex**, and
@@ -41,8 +41,8 @@ run shell commands) on the target Mac:
 
 ```text
 Install and set up PitStop (https://github.com/Livin21/pitstop), a macOS
-menu bar app that shows Claude Code usage limits and switches between
-Claude accounts, on this Mac.
+menu bar app that tracks usage limits and switches accounts across Claude
+Code, Claude Desktop, and OpenAI Codex, on this Mac.
 
 1. Verify requirements: macOS 26+, Xcode Command Line Tools
    (xcode-select --install), and Claude Code installed and logged in.
@@ -63,6 +63,10 @@ Claude accounts, on this Mac.
    sign in with the other account — PitStop saves it within 2 minutes
    (or via "Save Current Account" in the menu). I'll also click "Allow"
    on the notification prompt the first time it warns about usage.
+6. If I also use OpenAI Codex or the Claude Desktop app, tell me they're
+   detected automatically and show up in their own menu sections — Codex
+   accounts are switchable like Claude Code (it reads ~/.codex/auth.json,
+   no keychain grant), Claude Desktop is read-only.
 ```
 
 Or set it up manually:
@@ -86,8 +90,9 @@ Or set it up manually:
   Claude Code uses. Refreshes every 2 min (debounced on menu open), with
   exponential backoff honoring `Retry-After` when Anthropic rate-limits,
   retrying as soon as the backoff window expires; the last good numbers
-  stay visible (dimmed, "as of …") during outages.
-- **Menu bar number** is the active account's binding constraint —
+  stay visible (rows note "showing … data"; the menu bar dims) during
+  outages.
+- **Menu bar number** is the active Claude Code account's binding constraint —
   `max(5-hour, weekly)` utilization, with a warning dot from 75 % (🟠)
   and 90 % (🔴). (Dots rather than colored text: macOS repaints menu
   bar items in a single wallpaper-matched ink, and emoji are the only
@@ -130,15 +135,17 @@ Or set it up manually:
   since the requester is the stable Apple-signed `security` binary rather
   than the re-signed app bundle. Trade-off: writes pass the blob via argv
   (briefly visible in the process list) — same exposure Claude Code has.
-- **Switching** writes the chosen account's blob back into the live
+- **Switching a Claude account** writes its blob back into the live
   `Claude Code-credentials` keychain item and restores its `oauthAccount`
   identity in `~/.claude.json`. The whole blob is swapped, so per-account MCP
-  OAuth tokens (e.g. Atlassian) move with it.
-- **Stale tokens** of saved (inactive) accounts are refreshed automatically
-  via the standard OAuth refresh grant against Claude Code's public client,
-  and the refreshed tokens are stored back. The *active* account is never
-  refreshed by PitStop — Claude Code keeps it fresh itself (PitStop only
-  steps in as a fallback if it finds the live token already expired).
+  OAuth tokens (e.g. Atlassian) move with it. (Codex switching is the file
+  analog — see the Codex bullet above.)
+- **Stale tokens** of saved (inactive) Claude accounts are refreshed
+  automatically via the standard OAuth refresh grant against Claude Code's
+  public client, and the refreshed tokens are stored back. The *active*
+  account is never refreshed by PitStop — Claude Code keeps it fresh itself
+  (PitStop only steps in as a fallback if it finds the live token already
+  expired).
 
 ## Adding a second account
 
