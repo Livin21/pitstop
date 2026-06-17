@@ -826,8 +826,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let bars: [AccountRowView.BarRow]
         var extras: [String] = []
         let dataDate: Date?
-        var bindingUtil: Double?     // for the time-to-limit projection
-        var bindingReset: Date?
 
         if account.isCodex {
             let cu = codexUsage[key]
@@ -836,14 +834,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                       resetText: Format.compactReset($0.resetsAt))
             }
             dataDate = cu?.fetchedAt
-            if let top = cu?.windows.max(by: { $0.usedPercent < $1.usedPercent }) {
-                bindingUtil = top.usedPercent
-                bindingReset = top.resetsAt
-            }
         } else {
             let report = usage[key]
-            bindingUtil = report?.maxUtilization
-            bindingReset = report?.bindingWindow?.resetsAt
             bars = [
                 .init(label: "5h", utilization: report?.fiveHour?.utilization,
                       resetText: Format.compactReset(report?.fiveHour?.resetsAt)),
@@ -890,11 +882,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             status = "Loading…"
         }
 
-        var projection: String?
-        if let util = bindingUtil, fetchError[key] == nil,
-           let full = projectedFull(for: key, current: util, resetsAt: bindingReset) {
-            projection = "↗ on pace to hit limit ~\(Format.updated.string(from: full))"
-        }
+        let projection = fetchError[key] == nil ? projectionText(forKey: key) : nil
 
         let canSwitch = account.canSwitch && !account.isActive
         let isCodex = account.isCodex
@@ -998,35 +986,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Usage projection
 
-    /// Append the current binding utilization to each account's history,
-    /// pruned to ~30 min and cleared on a window reset (a drop in utilization).
+    /// Sample each account's per-window utilization (5-hour + weekly for Claude,
+    /// every rate-limit window for Codex), keyed "<account>#<window>". Pruned to
+    /// ~30 min and cleared per window on a reset (a real drop). Tracking each
+    /// window on its own — not the max of both — is what keeps the trend
+    /// coherent: the 5-hour and weekly windows climb and reset on entirely
+    /// different cadences, so a single blended series is meaningless.
     private func recordUsageSamples() {
         let now = Date()
         func record(_ key: String, _ util: Double) {
             var samples = usageHistory[key] ?? []
-            if let last = samples.last, util < last.util - 1 { samples.removeAll() }  // reset
-            samples.append((now, util))
+            if let last = samples.last, util < last.util - 2 { samples.removeAll() }  // window reset
+            samples.append((date: now, util: util))
             samples.removeAll { now.timeIntervalSince($0.date) > 1800 }
             usageHistory[key] = samples
         }
-        for (key, report) in usage where fetchError[key] == nil { record(key, report.maxUtilization) }
-        for (key, cu) in codexUsage where fetchError[key] == nil { record(key, cu.maxUtilization) }
+        for key in Set(usage.keys).union(codexUsage.keys) where fetchError[key] == nil {
+            for window in projectableWindows(forKey: key) {
+                record("\(key)#\(window.label)", window.util)
+            }
+        }
     }
 
-    /// Projected time the binding window hits 100% at the recent pace — only
-    /// when the trend is meaningfully rising, backed by enough data, and the
-    /// limit lands before the window resets. nil otherwise.
-    private func projectedFull(for key: String, current: Double, resetsAt: Date?) -> Date? {
-        guard Settings.showProjection, current < 100,
-              let samples = usageHistory[key], samples.count >= 3,
+    /// The windows PitStop projects toward their limit, for an account key:
+    /// Claude's 5-hour and weekly windows, or Codex's own rate-limit windows.
+    /// One source of truth so sampling and display stay in lockstep.
+    private func projectableWindows(forKey key: String)
+        -> [(label: String, util: Double, resetsAt: Date?)] {
+        if let cu = codexUsage[key] {
+            return cu.windows.map { (label: $0.label, util: $0.usedPercent, resetsAt: $0.resetsAt) }
+        }
+        if let report = usage[key] {
+            return [("5h", report.fiveHour), ("7d", report.sevenDay)]
+                .compactMap { label, window in
+                    window?.utilization.map { (label: label, util: $0, resetsAt: window?.resetsAt) }
+                }
+        }
+        return []
+    }
+
+    /// The soonest "on pace to hit <window> limit" across an account's windows,
+    /// or nil when none is trending toward its own limit before it resets.
+    private func projectionText(forKey key: String) -> String? {
+        guard Settings.showProjection else { return nil }
+        var soonest: (label: String, date: Date)?
+        for window in projectableWindows(forKey: key) {
+            guard let date = projectedFull(samples: usageHistory["\(key)#\(window.label)"],
+                                           current: window.util, resetsAt: window.resetsAt)
+            else { continue }
+            if soonest == nil || date < soonest!.date { soonest = (window.label, date) }
+        }
+        guard let soonest else { return nil }
+        return "↗ on pace to hit \(windowName(soonest.label)) limit ~\(Format.shortClock(soonest.date))"
+    }
+
+    private func windowName(_ label: String) -> String {
+        switch label {
+        case "5h": return "5-hour"
+        case "7d": return "weekly"
+        case "30d": return "monthly"
+        default: return label
+        }
+    }
+
+    /// Projected time one window hits 100% at its recent pace, from a
+    /// least-squares fit over its samples — only with enough data, a clear rise,
+    /// and the limit landing before the window resets. nil otherwise.
+    private func projectedFull(samples: [(date: Date, util: Double)]?,
+                               current: Double, resetsAt: Date?) -> Date? {
+        guard current < 100, let samples, samples.count >= 4,
               let first = samples.first, let last = samples.last else { return nil }
-        let dt = last.date.timeIntervalSince(first.date)
-        guard dt >= 300 else { return nil }                  // ≥ 5 min of trend
-        let rate = (last.util - first.util) / dt             // % per second
-        guard rate > 0.0005 else { return nil }              // rising > ~0.03 %/min
+        guard last.date.timeIntervalSince(first.date) >= 600 else { return nil }  // ≥ 10 min of trend
+        guard let rate = slopePerSecond(samples), rate > 0.0005 else { return nil }  // rising > ~1.8 %/h
         let projected = Date().addingTimeInterval((100 - current) / rate)
-        if let resetsAt, projected >= resetsAt { return nil }  // resets before it fills
+        guard projected > Date() else { return nil }
+        if let resetsAt, projected >= resetsAt { return nil }   // window resets before it fills
         return projected
+    }
+
+    /// Least-squares slope (utilization % per second) over the samples — robust
+    /// to the endpoint noise a first-vs-last slope suffers. nil if flat/degenerate.
+    private func slopePerSecond(_ samples: [(date: Date, util: Double)]) -> Double? {
+        let t0 = samples[0].date
+        let xs = samples.map { $0.date.timeIntervalSince(t0) }
+        let ys = samples.map(\.util)
+        let n = Double(samples.count)
+        let meanX = xs.reduce(0, +) / n
+        let meanY = ys.reduce(0, +) / n
+        var num = 0.0, den = 0.0
+        for i in samples.indices {
+            num += (xs[i] - meanX) * (ys[i] - meanY)
+            den += (xs[i] - meanX) * (xs[i] - meanX)
+        }
+        return den > 0 ? num / den : nil
     }
 
     /// Switch the live Codex account by swapping `~/.codex/auth.json`.
@@ -1078,6 +1130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 fetchError[key] = nil
                 nextFetchAllowed[key] = nil
                 failureCount[key] = nil
+                usageHistory = usageHistory.filter { !$0.key.hasPrefix("\(key)#") }
                 buildMenu()
             } catch {
                 showError("Couldn't remove account", error)

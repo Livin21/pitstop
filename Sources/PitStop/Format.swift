@@ -69,4 +69,12 @@ enum Format {
         if h > 0 { return "\(h)h \(m)m" }
         return "\(m)m"
     }
+
+    /// A coarse clock stamp for projections — "6:40 PM" today, "Sun 6:40 PM"
+    /// otherwise. No seconds: an extrapolated estimate can't justify that.
+    static func shortClock(_ date: Date) -> String {
+        Calendar.current.isDateInToday(date)
+            ? time.string(from: date)
+            : weekdayTime.string(from: date)
+    }
 }
