@@ -34,7 +34,7 @@ struct SettingsView: View {
                 if autoSwitch {
                     Stepper("Switch at \(threshold)% used", value: $threshold, in: 50 ... 99, step: 5)
                 }
-                Text("Flips the live account of each switchable provider — Claude Code and Codex — to the one with the most headroom, and notifies you. Desktop is read-only, so it's left alone.")
+                Text("Flips the live account of each switchable provider — Claude Code, Codex, and Gemini (CLI + Antigravity) — to the one with the most headroom, and notifies you. Claude Desktop is read-only, so it's left alone.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
