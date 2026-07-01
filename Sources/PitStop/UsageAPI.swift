@@ -189,7 +189,10 @@ enum UsageAPI {
                     throw APIError.unauthorized
                 }
                 guard http.statusCode == 200 else { throw APIError.http(http.statusCode) }
-                guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                // A definitive 200 is terminal even if the body is junk —
+                // JSONSerialization throwing here must NOT fall into the
+                // transport-failure catch below and replay the consumed code.
+                guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let access = root["access_token"] as? String,
                       let expiresIn = (root["expires_in"] as? NSNumber)?.doubleValue else {
                     throw APIError.malformed
