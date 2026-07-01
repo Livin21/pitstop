@@ -218,7 +218,7 @@ enum Codex {
             "client_id": clientID,
             "code_verifier": verifier,
         ]
-        req.httpBody = Data(fields.map { "\($0.key)=\(enc($0.value))" }
+        req.httpBody = Data(fields.map { "\(enc($0.key))=\(enc($0.value))" }
             .joined(separator: "&").utf8)
         return req
     }

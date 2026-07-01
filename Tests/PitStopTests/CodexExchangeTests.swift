@@ -14,7 +14,24 @@ final class CodexExchangeTests: XCTestCase {
         XCTAssertTrue(body.contains("code=C%2B1"))                 // '+' percent-encoded
         XCTAssertTrue(body.contains("code_verifier=V"))
         XCTAssertTrue(body.contains("client_id=\(Codex.clientID)"))
+        XCTAssertTrue(body.contains("redirect_uri="))              // required field present
         XCTAssertFalse(body.contains("state="))                    // Codex omits state in the body
+    }
+
+    func testIdentityFallbackAndNil() {
+        func b64url(_ s: String) -> String {
+            Data(s.utf8).base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+        // No top-level email — fall back to the profile-namespace email.
+        let fallback = #"{"https://api.openai.com/profile":{"email":"p@example.com"}}"#
+        let id = Codex.identity(fromIDToken: "\(b64url("{}")).\(b64url(fallback)).sig")
+        XCTAssertEqual(id?.email, "p@example.com")
+        XCTAssertNil(id?.accountID)
+        // No email anywhere — nil.
+        XCTAssertNil(Codex.identity(fromIDToken: "\(b64url("{}")).\(b64url(#"{"sub":"x"}"#)).sig"))
     }
 
     func testIdentityFromIDToken() {
