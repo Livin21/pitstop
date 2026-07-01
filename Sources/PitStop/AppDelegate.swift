@@ -275,15 +275,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func refreshNow(_ sender: Any?) {
         // Explicit refresh clears any backoff — the user asked for it.
         nextFetchAllowed.removeAll()
-        if refreshing {
-            refreshQueued = true
-            return
-        }
         refreshAll()
     }
 
     private func refreshAll() {
-        guard !refreshing else { return }
+        guard !refreshing else { refreshQueued = true; return }
         refreshing = true
         Task { @MainActor in
             defer {
