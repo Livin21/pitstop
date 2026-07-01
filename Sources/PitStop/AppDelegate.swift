@@ -275,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func refreshNow(_ sender: Any?) {
         // Explicit refresh clears any backoff — the user asked for it.
         nextFetchAllowed.removeAll()
+        geminiProject.removeAll()   // re-resolve — Code Assist may have been enabled since
         refreshAll()
     }
 
@@ -1302,6 +1303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // the fresh credentials and the row heals immediately (instead of
                 // staying "rejected" until the backoff expires).
                 clearFetchError(for: account.key)
+                if account.isGemini { geminiProject[account.email] = nil }
                 Notifier.shared.post(title: "Signed in to \(displayEmail(email))",
                                      body: "Fresh credentials saved. This account is switchable again.")
                 refreshAll()
