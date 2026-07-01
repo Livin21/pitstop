@@ -157,9 +157,11 @@ if CommandLine.arguments.contains("--preview") {
                   statusIsInfo: true, onSwitch: nil),
         ]
         // Middle row rendered in its hover state to preview the Switch pill.
-        let views = models.enumerated().map { i, m in
+        let rows = models.enumerated().map { i, m in
             AccountRowView(model: m, hover: i == 1)
         }
+        // A section header (hover state) to preview the dashboard link icon.
+        let views: [NSView] = [SectionHeaderView(title: "Claude", hover: true, onOpen: {})] + rows
         let totalHeight = views.reduce(0) { $0 + $1.frame.height }
         let container = NSView(frame: NSRect(x: 0, y: 0,
                                              width: AccountRowView.rowWidth,

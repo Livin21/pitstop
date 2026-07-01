@@ -59,6 +59,14 @@ enum Provider: CaseIterable {
         case .gemini: return "Gemini"
         }
     }
+    /// The provider's web usage dashboard, opened from the section-header link.
+    var dashboardURL: URL? {
+        switch self {
+        case .claude: return URL(string: "https://claude.ai/new#settings/usage")
+        case .codex: return URL(string: "https://chatgpt.com/codex/cloud/settings/analytics#usage")
+        case .gemini: return URL(string: "https://gemini.google.com/usage")
+        }
+    }
 }
 
 /// One row in the menu. Within a provider, accounts merge by email — the same
@@ -809,7 +817,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // One section per provider; rows in each carry a surface tag (Code /
         // Desktop) since the provider name is now the header.
         for group in groups {
-            menu.addItem(NSMenuItem.sectionHeader(title: group.provider.title))
+            if let url = group.provider.dashboardURL {
+                let header = NSMenuItem()
+                header.view = SectionHeaderView(title: group.provider.title) {
+                    NSWorkspace.shared.open(url)
+                }
+                menu.addItem(header)
+            } else {
+                menu.addItem(NSMenuItem.sectionHeader(title: group.provider.title))
+            }
             for account in group.accounts {
                 let item = NSMenuItem()
                 let view = AccountRowView(model: rowModel(for: account))
