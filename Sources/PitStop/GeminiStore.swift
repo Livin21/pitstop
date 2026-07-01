@@ -186,7 +186,14 @@ final class GeminiStore {
     /// saved snapshot otherwise.
     func blob(for email: String, surface: Gemini.Surface, isActive: Bool) async throws -> Data? {
         if isActive {
-            if surface == .cli, let live = liveCliBlob() { return live }
+            if surface == .cli, let live = liveCliBlob() {
+                // Trust the live file only when it demonstrably belongs to this
+                // account — google_accounts.json "active" (which decided
+                // isActive) and oauth_creds.json can diverge. A blob without an
+                // id_token can't be verified, so it keeps the old behavior.
+                let owner = Gemini.cliCreds(from: live)?.email
+                if owner == nil || owner == "Gemini account" || owner == email { return live }
+            }
             if surface == .antigravity, let live = await liveAntigravityBlob() { return live }
         }
         let service = surface == .cli ? Self.cliService : Self.antigravityService
