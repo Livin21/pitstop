@@ -280,7 +280,11 @@ final class LoopbackServer {
            let cap = captured(fromItems: comps.queryItems) { return cap }
         if s.contains("#") {
             let hs = s.split(separator: "#", maxSplits: 1)
-            if hs.count == 2 { return Captured(code: String(hs[0]), state: String(hs[1])) }
+            if hs.count == 2 {
+                let code = String(hs[0]), state = String(hs[1])
+                return Captured(code: code.removingPercentEncoding ?? code,
+                                state: state.removingPercentEncoding ?? state)
+            }
         }
         return captured(fromQuery: s)
     }
@@ -349,6 +353,16 @@ final class LoopbackServer {
                 let client = accept(listenFD, nil, nil)
                 guard client >= 0 else {
                     cont.resume(throwing: ServerError(msg: "accept failed (errno \(errno))")); return
+                }
+                // Bound the client read too: a stalled/half-open client (probe,
+                // scanner) must not block this worker thread indefinitely.
+                var cpfd = pollfd(fd: client, events: Int16(POLLIN), revents: 0)
+                let cpr = poll(&cpfd, 1, 10_000)
+                guard cpr > 0, (cpfd.revents & Int16(POLLIN)) != 0 else {
+                    close(client)
+                    cont.resume(throwing: ServerError(
+                        msg: cpr == 0 ? "Client sent no request" : "Client read failed"))
+                    return
                 }
                 var buf = [UInt8](repeating: 0, count: 8192)
                 let n = read(client, &buf, buf.count)
