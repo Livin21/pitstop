@@ -147,6 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var refreshing = false
     /// An explicit Refresh Now arrived while a refresh was in flight.
     private var refreshQueued = false
+    /// True while an OAuth re-login is running (prevents overlapping logins).
+    private var loginInFlight = false
+    private let pasteWindow = LoginPasteWindowController()
 
     private var isMenuOpen = false
     /// The menu got in-place updates while open; rebuild on close to re-sort.
@@ -817,6 +820,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// A row offers Login when its token was rejected (needsAction), it's a
+    /// switchable provider, and it isn't the live account. Inactive-only keeps
+    /// the "never touch live" invariant absolute.
+    func shouldOfferLogin(for account: MenuAccount) -> Bool {
+        needsAction.contains(account.key) && account.canSwitch && !account.isActive
+    }
+
+    /// Test seam: set the needs-action set directly.
+    func setNeedsActionForTest(_ keys: Set<String>) { needsAction = keys }
+
     /// Assemble the display model for one account row. Bars and extras differ
     /// by provider (Anthropic 5h/7d + Opus/Sonnet vs Codex's generic windows);
     /// the stale/error/loading status line is shared via the storage key.
@@ -886,6 +899,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let canSwitch = account.canSwitch && !account.isActive
         let isCodex = account.isCodex
+        let offerLogin = shouldOfferLogin(for: account)
         return AccountRowView.Model(
             email: displayEmail(email),
             planLabel: account.planLabel,
@@ -896,10 +910,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             projectionLine: projection,
             statusLine: status,
             statusIsInfo: statusIsInfo,
-            onSwitch: canSwitch ? { [weak self] in
+            onSwitch: (canSwitch && !offerLogin) ? { [weak self] in
                 if isCodex { self?.performCodexSwitch(to: email) }
                 else { self?.performSwitch(to: email) }
-            } : nil)
+            } : nil,
+            onLogin: offerLogin ? { [weak self] in self?.performLogin(account) } : nil)
     }
 
     private func addDisabled(_ text: String) {
@@ -1079,6 +1094,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             den += (xs[i] - meanX) * (xs[i] - meanX)
         }
         return den > 0 ? num / den : nil
+    }
+
+    private func performLogin(_ account: MenuAccount) {
+        guard !loginInFlight else { return }
+        loginInFlight = true
+        let adapter: LoginAdapter = account.isCodex ? CodexLoginAdapter() : ClaudeLoginAdapter()
+        let email = account.email
+        let ui = OAuthLoginCoordinator.UI(
+            openURL: { url in NSWorkspace.shared.open(url) },
+            promptPaste: { [weak self] in await self?.pasteWindow.prompt() ?? nil },
+            loopbackTimeout: 120)
+        Task { @MainActor in
+            defer { loginInFlight = false }
+            do {
+                try await OAuthLoginCoordinator().run(adapter: adapter, expectedEmail: email, ui: ui)
+                Notifier.shared.post(title: "Signed in to \(displayEmail(email))",
+                                     body: "Fresh credentials saved. This account is switchable again.")
+                refreshAll()
+            } catch is CancellationError {
+                // user cancelled — no message
+            } catch {
+                showError("Couldn't sign in", error)
+            }
+        }
     }
 
     /// Switch the live Codex account by swapping `~/.codex/auth.json`.
