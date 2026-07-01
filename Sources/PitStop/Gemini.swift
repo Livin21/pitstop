@@ -159,4 +159,105 @@ enum Gemini {
     private static let quotaReset: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f
     }()
+
+    // MARK: - Network
+
+    struct Client { let id: String; let secret: String; let scopes: String }
+
+    static let cliClient = Client(
+        id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
+        secret: "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",
+        scopes: "https://www.googleapis.com/auth/cloud-platform "
+            + "https://www.googleapis.com/auth/userinfo.email "
+            + "https://www.googleapis.com/auth/userinfo.profile")
+
+    static let antigravityClient = Client(
+        id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+        secret: "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",
+        scopes: cliClient.scopes + " https://www.googleapis.com/auth/cclog "
+            + "https://www.googleapis.com/auth/experimentsandconfigs")
+
+    static let tokenURL = URL(string: "https://oauth2.googleapis.com/token")!
+    static let codeAssistBase = "https://cloudcode-pa.googleapis.com/v1internal"
+
+    static func client(for surface: Surface) -> Client {
+        surface == .cli ? cliClient : antigravityClient
+    }
+
+    private static func formEncode(_ s: String) -> String {
+        var cs = CharacterSet.alphanumerics; cs.insert(charactersIn: "-._~")
+        return s.addingPercentEncoding(withAllowedCharacters: cs) ?? s
+    }
+
+    static func refreshRequest(refreshToken: String, client: Client) -> URLRequest {
+        var req = URLRequest(url: tokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        let fields = ["grant_type": "refresh_token", "refresh_token": refreshToken,
+                      "client_id": client.id, "client_secret": client.secret]
+        req.httpBody = Data(fields.map { "\(formEncode($0.key))=\(formEncode($0.value))" }
+            .joined(separator: "&").utf8)
+        return req
+    }
+
+    private static func codeAssistRequest(method: String, accessToken: String,
+                                          body: [String: Any]) -> URLRequest {
+        var req = URLRequest(url: URL(string: "\(codeAssistBase):\(method)")!)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return req
+    }
+
+    static func loadCodeAssistRequest(accessToken: String) -> URLRequest {
+        codeAssistRequest(method: "loadCodeAssist", accessToken: accessToken,
+                          body: ["metadata": ["ideType": "IDE_UNSPECIFIED",
+                                              "platform": "DARWIN_ARM64",
+                                              "pluginType": "GEMINI"]])
+    }
+
+    static func quotaRequest(accessToken: String, project: String) -> URLRequest {
+        codeAssistRequest(method: "retrieveUserQuota", accessToken: accessToken,
+                          body: ["project": project])
+    }
+
+    /// Google refresh_token grant. Returns a fresh access token; Google does NOT
+    /// rotate the refresh token, so the caller keeps the existing one.
+    static func refresh(refreshToken: String, client: Client) async throws
+        -> (accessToken: String, idToken: String?, expiryMs: Double) {
+        let (data, resp) = try await URLSession.shared.data(for: refreshRequest(refreshToken: refreshToken, client: client))
+        guard let http = resp as? HTTPURLResponse else { throw GeminiError.malformed }
+        if http.statusCode == 400 || http.statusCode == 401 || http.statusCode == 403 {
+            throw GeminiError.sessionExpired
+        }
+        guard http.statusCode == 200,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let access = root["access_token"] as? String else { throw GeminiError.malformed }
+        let expiresIn = (root["expires_in"] as? NSNumber)?.doubleValue ?? 3600
+        return (access, root["id_token"] as? String,
+                (Date().timeIntervalSince1970 + expiresIn) * 1000)
+    }
+
+    static func loadProject(accessToken: String) async throws -> (project: String?, planLabel: String) {
+        let (data, resp) = try await URLSession.shared.data(for: loadCodeAssistRequest(accessToken: accessToken))
+        guard let http = resp as? HTTPURLResponse else { throw GeminiError.malformed }
+        if http.statusCode == 401 || http.statusCode == 403 { throw GeminiError.sessionExpired }
+        guard http.statusCode == 200 else { throw UsageAPI.APIError.http(http.statusCode) }
+        return parseLoadCodeAssist(data)
+    }
+
+    static func fetchUsage(accessToken: String, project: String) async throws -> Usage {
+        let (data, resp) = try await URLSession.shared.data(for: quotaRequest(accessToken: accessToken, project: project))
+        guard let http = resp as? HTTPURLResponse else { throw GeminiError.malformed }
+        if http.statusCode == 401 || http.statusCode == 403 { throw GeminiError.sessionExpired }
+        if http.statusCode == 429 {
+            let ra = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+            throw UsageAPI.APIError.rateLimited(retryAfter: ra)
+        }
+        guard http.statusCode == 200 else { throw UsageAPI.APIError.http(http.statusCode) }
+        return parseQuota(data)
+    }
 }
