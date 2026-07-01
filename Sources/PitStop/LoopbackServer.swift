@@ -62,6 +62,25 @@ final class LoopbackServer {
         return Captured(code: code, state: state)
     }
 
+    /// What one HTTP request means to the OAuth wait loop.
+    enum CallbackOutcome {
+        case captured(Captured)
+        case denied          // OAuth error redirect (?error=access_denied&…)
+        case notCallback     // favicon, probes — answer 404 and keep waiting
+    }
+
+    static func classify(requestLine: String) -> CallbackOutcome {
+        if let cap = parse(requestLine: requestLine) { return .captured(cap) }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2,
+              let query = parts[1].split(separator: "?").dropFirst().first else { return .notCallback }
+        for pair in query.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, kv[0] == "error" { return .denied }
+        }
+        return .notCallback
+    }
+
     /// Bind the first available loopback port in `ports`.
     func start(ports: [UInt16]) throws {
         for p in ports {
@@ -78,13 +97,21 @@ final class LoopbackServer {
                     Darwin.bind(s, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
             }
-            if bound == 0, listen(s, 1) == 0 { fd = s; port = p; return }
+            if bound == 0, listen(s, 16) == 0 { fd = s; port = p; return }
             close(s)
         }
         throw ServerError(msg: "No free loopback port in \(ports)")
     }
 
-    /// Await the first callback. Uses `poll()` with a deadline so the timeout
+    /// How long an accepted connection gets to send its request. Short: the
+    /// real redirect sends immediately; browser preconnect sockets never do,
+    /// and each one holds up the accept loop for this long. Test seam.
+    static var clientReadTimeoutMs: Int32 = 3000
+
+    /// Await the redirect callback. Accepts (and answers) any number of stray
+    /// connections — browser preconnects, favicon fetches — until a parseable
+    /// callback arrives; an OAuth error redirect (user denied) throws
+    /// `LoginError.cancelled`. Uses `poll()` with a deadline so the timeout
     /// path never leaves a thread blocked in `accept()` — a task-group race with
     /// a blocking accept deadlocks, because the group awaits the (still-blocked)
     /// accept child before it can return the timeout.
@@ -93,47 +120,66 @@ final class LoopbackServer {
         guard listenFD >= 0 else { throw ServerError(msg: "Loopback server not started") }
         return try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
-                var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
-                let pr = poll(&pfd, 1, Int32(max(timeout, 0) * 1000))
-                if pr == 0 {
-                    cont.resume(throwing: ServerError(msg: "Timed out waiting for the browser")); return
-                }
-                if pr < 0 {
-                    cont.resume(throwing: ServerError(msg: "poll failed (errno \(errno))")); return
-                }
-                if (pfd.revents & Int16(POLLIN)) == 0 {
-                    cont.resume(throwing: ServerError(msg: "Loopback socket closed")); return
-                }
-                let client = accept(listenFD, nil, nil)
-                guard client >= 0 else {
-                    cont.resume(throwing: ServerError(msg: "accept failed (errno \(errno))")); return
-                }
-                // Bound the client read too: a stalled/half-open client (probe,
-                // scanner) must not block this worker thread indefinitely.
-                var cpfd = pollfd(fd: client, events: Int16(POLLIN), revents: 0)
-                let cpr = poll(&cpfd, 1, 10_000)
-                guard cpr > 0, (cpfd.revents & Int16(POLLIN)) != 0 else {
-                    close(client)
-                    cont.resume(throwing: ServerError(
-                        msg: cpr == 0 ? "Client sent no request" : "Client read failed"))
-                    return
-                }
-                var buf = [UInt8](repeating: 0, count: 8192)
-                let n = read(client, &buf, buf.count)
-                let text = n > 0 ? (String(bytes: buf[0..<n], encoding: .utf8) ?? "") : ""
-                let firstLine = text.components(separatedBy: "\r\n").first ?? ""
-                let body = "You can close this tab and return to PitStop."
-                let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-                    + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-                _ = resp.withCString { write(client, $0, strlen($0)) }
-                close(client)
-                if let cap = LoopbackServer.parse(requestLine: firstLine) {
-                    cont.resume(returning: cap)
-                } else {
-                    cont.resume(throwing: ServerError(msg: "Unparseable callback"))
+                let deadline = Date().addingTimeInterval(timeout)
+                while true {
+                    let remaining = deadline.timeIntervalSinceNow
+                    guard remaining > 0 else {
+                        cont.resume(throwing: ServerError(msg: "Timed out waiting for the browser")); return
+                    }
+                    var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
+                    let pr = poll(&pfd, 1, Int32(remaining * 1000))
+                    if pr == 0 {
+                        cont.resume(throwing: ServerError(msg: "Timed out waiting for the browser")); return
+                    }
+                    if pr < 0 {
+                        if errno == EINTR { continue }   // signal (e.g. SIGCHLD) — keep waiting
+                        cont.resume(throwing: ServerError(msg: "poll failed (errno \(errno))")); return
+                    }
+                    if (pfd.revents & Int16(POLLIN)) == 0 {
+                        cont.resume(throwing: ServerError(msg: "Loopback socket closed")); return
+                    }
+                    let client = accept(listenFD, nil, nil)
+                    guard client >= 0 else {
+                        if errno == EINTR || errno == ECONNABORTED { continue }
+                        cont.resume(throwing: ServerError(msg: "accept failed (errno \(errno))")); return
+                    }
+                    switch Self.handleClient(client) {
+                    case .captured(let cap): cont.resume(returning: cap); return
+                    case .denied: cont.resume(throwing: LoginError.cancelled); return
+                    case .notCallback: continue
+                    }
                 }
             }
         }
+    }
+
+    /// Read one request from an accepted connection, answer it, classify it.
+    /// A connection that never sends (browser preconnect) counts as notCallback.
+    private static func handleClient(_ client: Int32) -> CallbackOutcome {
+        defer { close(client) }
+        var cpfd = pollfd(fd: client, events: Int16(POLLIN), revents: 0)
+        var cpr = poll(&cpfd, 1, clientReadTimeoutMs)
+        while cpr < 0 && errno == EINTR { cpr = poll(&cpfd, 1, clientReadTimeoutMs) }
+        guard cpr > 0, (cpfd.revents & Int16(POLLIN)) != 0 else { return .notCallback }
+        var buf = [UInt8](repeating: 0, count: 8192)
+        let n = read(client, &buf, buf.count)
+        guard n > 0, let text = String(bytes: buf[0..<n], encoding: .utf8) else { return .notCallback }
+        let outcome = classify(requestLine: text.components(separatedBy: "\r\n").first ?? "")
+        switch outcome {
+        case .captured: respond(client, status: "200 OK",
+                                body: "You can close this tab and return to PitStop.")
+        case .denied: respond(client, status: "200 OK",
+                              body: "Sign-in was cancelled. You can close this tab.")
+        case .notCallback: respond(client, status: "404 Not Found",
+                                   body: "PitStop is waiting for the sign-in callback.")
+        }
+        return outcome
+    }
+
+    private static func respond(_ client: Int32, status: String, body: String) {
+        let resp = "HTTP/1.1 \(status)\r\nContent-Type: text/plain\r\n"
+            + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        _ = resp.withCString { write(client, $0, strlen($0)) }
     }
 
     func stop() {
