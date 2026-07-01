@@ -5,23 +5,36 @@ struct UsageWindow {
     let resetsAt: Date?
 }
 
+/// A per-model weekly limit ("Fable", …) from the limits array's
+/// weekly_scoped entries. An independent cap: hitting it blocks only that
+/// model, but per user preference it still counts toward the binding number.
+struct ScopedWindow {
+    let label: String
+    let window: UsageWindow
+}
+
 struct UsageReport {
     var fiveHour: UsageWindow?
     var sevenDay: UsageWindow?
     var sevenDayOpus: UsageWindow?
     var sevenDaySonnet: UsageWindow?
+    var scoped: [ScopedWindow] = []
     var extraUsageEnabled = false
     var extraUsageUtilization: Double?
     var fetchedAt = Date()
 
     /// The binding constraint — whichever window is closest to its limit.
-    var maxUtilization: Double {
-        max(fiveHour?.utilization ?? 0, sevenDay?.utilization ?? 0)
-    }
+    var maxUtilization: Double { bindingWindow?.utilization ?? 0 }
 
     /// The window driving `maxUtilization`, for reset-time display.
+    /// First-wins on ties, so 5h beats 7d beats scoped at equal utilization.
     var bindingWindow: UsageWindow? {
-        (fiveHour?.utilization ?? 0) >= (sevenDay?.utilization ?? 0) ? fiveHour : sevenDay
+        var best: UsageWindow?
+        for w in [fiveHour, sevenDay].compactMap({ $0 }) + scoped.map(\.window)
+        where best == nil || (w.utilization ?? 0) > (best?.utilization ?? 0) {
+            best = w
+        }
+        return best
     }
 }
 
@@ -88,6 +101,16 @@ enum UsageAPI {
         report.sevenDay = window(root["seven_day"])
         report.sevenDayOpus = window(root["seven_day_opus"])
         report.sevenDaySonnet = window(root["seven_day_sonnet"])
+        let limits = (root["limits"] as? [[String: Any]]) ?? []
+        if report.fiveHour == nil { report.fiveHour = limitWindow(limits, kind: "session") }
+        if report.sevenDay == nil { report.sevenDay = limitWindow(limits, kind: "weekly_all") }
+        report.scoped = limits
+            .filter { $0["kind"] as? String == "weekly_scoped" }
+            .compactMap { entry in
+                guard let w = limitWindow(entry) else { return nil }
+                let model = (entry["scope"] as? [String: Any])?["model"] as? [String: Any]
+                return ScopedWindow(label: model?["display_name"] as? String ?? "Scoped", window: w)
+            }
         if let extra = root["extra_usage"] as? [String: Any] {
             report.extraUsageEnabled = (extra["is_enabled"] as? Bool) ?? false
             report.extraUsageUtilization = (extra["utilization"] as? NSNumber)?.doubleValue
@@ -103,6 +126,20 @@ enum UsageAPI {
             date = isoFrac.date(from: s) ?? iso.date(from: s)
         }
         return UsageWindow(utilization: util, resetsAt: date)
+    }
+
+    /// A UsageWindow from a `limits[]` entry (percent + resets_at).
+    private static func limitWindow(_ entry: [String: Any]) -> UsageWindow? {
+        guard let pct = (entry["percent"] as? NSNumber)?.doubleValue else { return nil }
+        var date: Date?
+        if let s = entry["resets_at"] as? String {
+            date = isoFrac.date(from: s) ?? iso.date(from: s)
+        }
+        return UsageWindow(utilization: pct, resetsAt: date)
+    }
+
+    private static func limitWindow(_ limits: [[String: Any]], kind: String) -> UsageWindow? {
+        limits.first { $0["kind"] as? String == kind }.flatMap(limitWindow)
     }
 
     /// Standard OAuth refresh-token grant against Claude Code's public client.

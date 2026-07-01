@@ -40,8 +40,10 @@ enum IndicatorMetric: String, CaseIterable {
     func utilization(of report: UsageReport) -> Double? {
         switch self {
         case .binding:
-            return report.fiveHour?.utilization == nil && report.sevenDay?.utilization == nil
-                ? nil : report.maxUtilization
+            let hasData = report.fiveHour?.utilization != nil
+                || report.sevenDay?.utilization != nil
+                || report.scoped.contains { $0.window.utilization != nil }
+            return hasData ? report.maxUtilization : nil
         case .fiveHour: return report.fiveHour?.utilization
         case .weekly: return report.sevenDay?.utilization
         }
