@@ -89,6 +89,20 @@ enum Codex {
         return compact
     }
 
+    /// If the live auth.json carries an OPENAI_API_KEY that the saved snapshot
+    /// lacks, carry it into the blob being written — a switch must not destroy
+    /// API-key auth that only ever lived in the file (captureCurrent can't
+    /// snapshot it: there's no account identity to file it under).
+    static func preservingAPIKey(from live: Data?, into blob: Data) -> Data {
+        guard let live,
+              let liveRoot = try? JSONSerialization.jsonObject(with: live) as? [String: Any],
+              let apiKey = liveRoot["OPENAI_API_KEY"] as? String, !apiKey.isEmpty,
+              var root = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
+              (root["OPENAI_API_KEY"] as? String)?.isEmpty ?? true else { return blob }
+        root["OPENAI_API_KEY"] = apiKey
+        return (try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])) ?? blob
+    }
+
     /// Parse a ChatGPT (not API-key) Codex auth blob into credentials +
     /// identity. Returns nil for API-key auth or a blob without ChatGPT tokens.
     static func credentials(from blob: Data) -> Creds? {

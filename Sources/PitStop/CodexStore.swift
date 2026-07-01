@@ -108,7 +108,7 @@ final class CodexStore {
         guard let blob = try await Keychain.read(service: Self.service, account: email) else {
             throw StoreError(message: "No saved credentials for \(email) — sign in once with `codex` and save again")
         }
-        try writeLive(blob)
+        try writeLive(Codex.preservingAPIKey(from: Codex.liveBlob(), into: blob))
     }
 
     func remove(email: String) async throws {
