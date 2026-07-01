@@ -245,6 +245,10 @@ enum Gemini {
         let (data, resp) = try await URLSession.shared.data(for: loadCodeAssistRequest(accessToken: accessToken))
         guard let http = resp as? HTTPURLResponse else { throw GeminiError.malformed }
         if http.statusCode == 401 || http.statusCode == 403 { throw GeminiError.sessionExpired }
+        if http.statusCode == 429 {
+            let ra = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+            throw UsageAPI.APIError.rateLimited(retryAfter: ra)
+        }
         guard http.statusCode == 200 else { throw UsageAPI.APIError.http(http.statusCode) }
         return parseLoadCodeAssist(data)
     }
