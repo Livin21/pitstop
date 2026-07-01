@@ -89,19 +89,29 @@ final class GeminiStore {
 
     func liveCliBlob() -> Data? { try? Data(contentsOf: Self.cliCredsURL) }
 
+    /// The active Google account email from the shared ~/.gemini/google_accounts.json.
+    /// This is the one local identity source both surfaces agree on.
+    func activeGoogleEmail() -> String? {
+        guard let data = try? Data(contentsOf: Self.googleAccountsURL),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let active = root["active"] as? String, !active.isEmpty else { return nil }
+        return active
+    }
+
     func liveCliEmail() -> String? {
-        if let data = try? Data(contentsOf: Self.googleAccountsURL),
-           let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-           let active = root["active"] as? String, !active.isEmpty { return active }
-        return liveCliBlob().flatMap(Gemini.cliCreds(from:))?.email
+        activeGoogleEmail() ?? liveCliBlob().flatMap(Gemini.cliCreds(from:))?.email
     }
 
     func liveAntigravityBlob() async -> Data? {
         try? await Keychain.read(service: Self.liveKeychainService, account: Self.liveKeychainAccount)
     }
 
+    /// The Antigravity keychain blob carries no id_token/email, so the live
+    /// Antigravity account's identity is the shared active Google account
+    /// (google_accounts.json), not something decodable from the blob.
     func liveAntigravityEmail() async -> String? {
-        await liveAntigravityBlob().flatMap(Gemini.antigravityCreds(from:))?.email
+        guard await liveAntigravityBlob() != nil else { return nil }
+        return activeGoogleEmail()
     }
 
     // MARK: - Snapshot / switch
@@ -113,7 +123,9 @@ final class GeminiStore {
         let cliBlob = liveCliBlob()
         let cliEmail = cliBlob.flatMap(Gemini.cliCreds(from:))?.email
         let agBlob = await liveAntigravityBlob()
-        let agEmail = agBlob.flatMap(Gemini.antigravityCreds(from:))?.email
+        // The Antigravity blob has no identity; its account is the shared active
+        // Google account (google_accounts.json), so it merges with the CLI row.
+        let agEmail = agBlob != nil ? activeGoogleEmail() : nil
 
         func upsert(_ blob: Data?, email: String?, service: String) async throws -> Bool {
             guard let blob, let email else { return false }
