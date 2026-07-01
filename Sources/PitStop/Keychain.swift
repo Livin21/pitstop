@@ -118,6 +118,20 @@ enum Keychain {
         }
     }
 
+    /// Update a live keychain item **in place** (`-U`) with an explicit account.
+    /// Use when the caller knows the exact account attribute (e.g. Antigravity's
+    /// fixed "antigravity" account) to avoid a metadata read before the write.
+    static func upsertLive(service: String, account: String, data: Data) async throws {
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw Failure(message: "Credential blob is not UTF-8")
+        }
+        let r = try await run(["add-generic-password", "-U", "-s", service, "-a", account, "-w", value])
+        guard r.status == 0 else {
+            throw Failure(message: "Keychain write of \(service) failed (\(r.status)): "
+                + r.err.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
     static func delete(service: String, account: String) async throws {
         let r = try await run(["delete-generic-password", "-s", service, "-a", account])
         guard r.status == 0 || r.status == notFound else {

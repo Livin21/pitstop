@@ -159,7 +159,7 @@ final class GeminiStore {
             try writeCliLive(cli, email: email); wrote = true
         }
         if let ag = try await Keychain.read(service: Self.antigravityService, account: email) {
-            try await Keychain.upsertLive(service: Self.liveKeychainService, data: ag); wrote = true
+            try await Keychain.upsertLive(service: Self.liveKeychainService, account: Self.liveKeychainAccount, data: ag); wrote = true
         }
         guard wrote else {
             throw StoreError(message: "No saved Gemini credentials for \(email) — sign in once and save again")

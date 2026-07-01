@@ -17,12 +17,13 @@ enum Gemini {
     }
 
     enum GeminiError: LocalizedError {
-        case sessionExpired, malformed, notSignedIn
+        case sessionExpired, malformed, notSignedIn, noProject
         var errorDescription: String? {
             switch self {
             case .sessionExpired: return "Gemini session expired — sign in again"
             case .malformed: return "Unexpected Gemini response"
             case .notSignedIn: return "Not signed in to Gemini"
+            case .noProject: return "Signed in, but no Gemini Code Assist project"
             }
         }
     }
@@ -83,8 +84,6 @@ enum Gemini {
         guard let data = Data(base64Encoded: s),
               let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         if let e = claims["email"] as? String { return e }
-        if let p = claims["https://api.openai.com/profile"] as? [String: Any],
-           let e = p["email"] as? String { return e }
         return nil
     }
 
@@ -101,6 +100,35 @@ enum Gemini {
         f.formatOptions = [.withInternetDateTime, .withTimeZone]
         return f
     }()
+
+    // MARK: - Credential patching
+
+    /// Patch the CLI oauth_creds.json blob in place: update access_token, expiry_date,
+    /// and id_token (if non-nil), preserving all other keys. Returns nil if old isn't
+    /// a JSON object.
+    static func patchCliBlob(_ old: Data, access: String, idToken: String?, expiryMs: Double) -> Data? {
+        guard var obj = try? JSONSerialization.jsonObject(with: old) as? [String: Any] else { return nil }
+        obj["access_token"] = access
+        obj["expiry_date"] = expiryMs
+        if let idToken { obj["id_token"] = idToken }
+        return try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+    }
+
+    /// Patch the Antigravity go-keyring blob in place: update token.access_token,
+    /// token.expiry, and token.id_token (if non-nil), preserving all other keys.
+    /// Re-wraps with `encodeGoKeyring`. Returns nil if it can't decode/parse.
+    static func patchAntigravityBlob(_ old: Data, access: String, idToken: String?, expiryISO: String) -> Data? {
+        guard let raw = String(data: old, encoding: .utf8),
+              let innerData = decodeGoKeyring(raw),
+              var innerObj = try? JSONSerialization.jsonObject(with: innerData) as? [String: Any],
+              var tok = innerObj["token"] as? [String: Any] else { return nil }
+        tok["access_token"] = access
+        tok["expiry"] = expiryISO
+        if let idToken { tok["id_token"] = idToken }
+        innerObj["token"] = tok
+        guard let reencoded = try? JSONSerialization.data(withJSONObject: innerObj, options: [.sortedKeys]) else { return nil }
+        return Data(encodeGoKeyring(reencoded).utf8)
+    }
 
     // MARK: - Usage
 

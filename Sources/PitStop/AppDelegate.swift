@@ -202,6 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var emails = store.profiles.map(\.email)
         if let d = desktopAccount, !emails.contains(d.email) { emails.append(d.email) }
         for c in codexStore.profiles where !emails.contains(c.email) { emails.append(c.email) }
+        for g in geminiStore.profiles where !emails.contains(g.email) { emails.append(g.email) }
         return emails
     }
 
@@ -538,22 +539,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let fresh = try await Gemini.refresh(refreshToken: rt, client: Gemini.client(for: surface))
             accessToken = fresh.accessToken
             if !isActive {
+                let expiryISO = Gemini.iso8601.string(from: Date(timeIntervalSince1970: fresh.expiryMs / 1000))
+                let idToken = fresh.idToken ?? creds.idToken
                 let rebuilt: Data = surface == .cli
-                    ? GeminiStore.buildCliBlob(access: fresh.accessToken, refresh: rt,
-                                               idToken: fresh.idToken ?? creds.idToken, expiryMs: fresh.expiryMs)
-                    : GeminiStore.buildAntigravityBlob(access: fresh.accessToken, refresh: rt,
-                                                       idToken: fresh.idToken ?? creds.idToken,
-                                                       expiryISO: Gemini.iso8601.string(from: Date(timeIntervalSince1970: fresh.expiryMs / 1000)))
+                    ? Gemini.patchCliBlob(blob, access: fresh.accessToken,
+                                          idToken: idToken, expiryMs: fresh.expiryMs)
+                      ?? GeminiStore.buildCliBlob(access: fresh.accessToken, refresh: rt,
+                                                  idToken: idToken, expiryMs: fresh.expiryMs)
+                    : Gemini.patchAntigravityBlob(blob, access: fresh.accessToken,
+                                                  idToken: idToken, expiryISO: expiryISO)
+                      ?? GeminiStore.buildAntigravityBlob(access: fresh.accessToken, refresh: rt,
+                                                          idToken: idToken, expiryISO: expiryISO)
                 try await geminiStore.storeRefreshedBlob(rebuilt, email: email, surface: surface)
             }
         }
         // Resolve + cache the cloudaicompanionProject.
         if geminiProject[email] == nil {
             let r = try await Gemini.loadProject(accessToken: accessToken)
-            geminiProject[email] = r.project
+            if let p = r.project {
+                geminiProject[email] = p
+            } else {
+                geminiProject[email] = ""   // sentinel: signed in but no Code Assist project
+            }
             geminiStore.setPlanLabel(r.planLabel, email: email)
         }
-        guard let project = geminiProject[email] else { throw Gemini.GeminiError.notSignedIn }
+        let cachedProject = geminiProject[email]
+        if cachedProject == "" { throw Gemini.GeminiError.noProject }
+        guard let project = cachedProject else { throw Gemini.GeminiError.notSignedIn }
         return try await Gemini.fetchUsage(accessToken: accessToken, project: project)
     }
 
@@ -1144,7 +1156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             samples.removeAll { now.timeIntervalSince($0.date) > 1800 }
             usageHistory[key] = samples
         }
-        for key in Set(usage.keys).union(codexUsage.keys) where fetchError[key] == nil {
+        for key in Set(usage.keys).union(codexUsage.keys).union(geminiUsage.keys) where fetchError[key] == nil {
             for window in projectableWindows(forKey: key) {
                 record("\(key)#\(window.label)", window.util)
             }
@@ -1158,6 +1170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         -> [(label: String, util: Double, resetsAt: Date?)] {
         if let cu = codexUsage[key] {
             return cu.windows.map { (label: $0.label, util: $0.usedPercent, resetsAt: $0.resetsAt) }
+        }
+        if let gu = geminiUsage[key] {
+            return gu.windows.map { (label: $0.label, util: $0.usedPercent, resetsAt: $0.resetsAt) }
         }
         if let report = usage[key] {
             return [("5h", report.fiveHour), ("7d", report.sevenDay)]
