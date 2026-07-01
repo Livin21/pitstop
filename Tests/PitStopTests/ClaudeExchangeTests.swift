@@ -21,6 +21,7 @@ final class ClaudeExchangeTests: XCTestCase {
 
     func testProfileRequestShape() {
         let req = UsageAPI.profileRequest(accessToken: "sk-ant-oat01-TOKEN")
+        XCTAssertEqual(req.httpMethod, "GET")
         XCTAssertEqual(req.url?.host, "api.anthropic.com")
         XCTAssertTrue(req.url?.path.contains("/oauth/profile") ?? false)
         XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer sk-ant-oat01-TOKEN")

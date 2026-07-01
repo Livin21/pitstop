@@ -165,9 +165,13 @@ enum UsageAPI {
         return req
     }
 
-    /// Exchange an authorization code for tokens. Tries each host in order,
-    /// falling through on connection/host errors; a 4xx from a reachable host
-    /// is returned as `.unauthorized`.
+    /// Exchange an authorization code for tokens. The two hosts are tried only to
+    /// discover which one serves this grant, so we fall through to the next host
+    /// ONLY when this one can't have processed the code — a transport failure or
+    /// a 404 (endpoint not on this host). Any other definitive response is
+    /// authoritative and terminal: an authorization code is single-use, so we
+    /// must not replay a possibly-consumed code against the other host. A reachable
+    /// 400/401/403 is `.unauthorized`; any other non-200 surfaces as `.http`.
     static func exchangeCode(code: String, state: String, verifier: String,
                              redirectURI: String) async throws
         -> (accessToken: String, refreshToken: String?, expiresAtMs: Double) {
@@ -178,7 +182,10 @@ enum UsageAPI {
                                               redirectURI: redirectURI, host: host)
                 let (data, resp) = try await URLSession.shared.data(for: req)
                 guard let http = resp as? HTTPURLResponse else { throw APIError.malformed }
-                if http.statusCode == 401 || http.statusCode == 403 || http.statusCode == 400 {
+                if http.statusCode == 404 {
+                    lastError = APIError.http(404); continue   // endpoint not here — try next host
+                }
+                if http.statusCode == 400 || http.statusCode == 401 || http.statusCode == 403 {
                     throw APIError.unauthorized
                 }
                 guard http.statusCode == 200 else { throw APIError.http(http.statusCode) }
@@ -190,9 +197,9 @@ enum UsageAPI {
                 let expiresAtMs = (Date().timeIntervalSince1970 + expiresIn) * 1000
                 return (access, root["refresh_token"] as? String, expiresAtMs)
             } catch let error as APIError {
-                // A definitive auth rejection shouldn't fall through to the next host.
-                if case .unauthorized = error { throw error }
-                lastError = error
+                // A definitive response from a reachable host is authoritative;
+                // only transport failures (below) retry the next host.
+                throw error
             } catch {
                 lastError = error   // connection/DNS — try the next host
             }
@@ -203,6 +210,7 @@ enum UsageAPI {
     /// Build the identity (profile) request. Pure, for testing.
     static func profileRequest(accessToken: String) -> URLRequest {
         var req = URLRequest(url: profileURL)
+        req.httpMethod = "GET"
         req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
