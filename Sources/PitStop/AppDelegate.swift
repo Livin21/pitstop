@@ -438,12 +438,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return
             }
             desktopAccount = account
-            // Record Desktop usage when no Code profile covers this email, or
-            // when one does but its Code fetch failed this cycle — fall back to
-            // the (healthy) Desktop session rather than showing the Code error.
-            if !store.profiles.contains(where: { $0.email == account.email })
-                || fetchError[account.email] != nil {
+            // Record Desktop usage when no Code profile covers this email; when
+            // one does but its Code fetch failed this cycle, refresh the numbers
+            // from the healthy Desktop session WITHOUT clearing the Code error,
+            // backoff, or needs-action state — the Code credentials are still
+            // broken, and clearing the gate here would retry the dead refresh
+            // token every cycle and hide the re-login affordance.
+            if !store.profiles.contains(where: { $0.email == account.email }) {
                 recordFetchSuccess(report, for: account.email)
+            } else if fetchError[account.email] != nil {
+                usage[account.email] = report
             }
         } catch {
             // Keep the last-known identity so the row doesn't flicker out;
