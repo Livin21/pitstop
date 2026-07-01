@@ -28,6 +28,17 @@ final class GeminiStoreTests: XCTestCase {
         XCTAssertEqual(inner["auth_method"] as? String, "consumer")
     }
 
+    func testNormalizedBlobFlattensPrettyJSON() {
+        let pretty = try! JSONSerialization.data(
+            withJSONObject: ["access_token": "AT", "expiry_date": 1.0],
+            options: [.prettyPrinted])
+        let flat = Gemini.normalizedBlob(pretty)
+        XCTAssertFalse(String(data: flat, encoding: .utf8)!.contains("\n"))
+        XCTAssertEqual(Gemini.cliCreds(from: flat)?.accessToken, "AT")
+        // Non-JSON passes through untouched.
+        XCTAssertEqual(Gemini.normalizedBlob(Data("x".utf8)), Data("x".utf8))
+    }
+
     func testServicesAndPaths() {
         XCTAssertEqual(GeminiStore.cliService, "PitStop-gemini-cli")
         XCTAssertEqual(GeminiStore.antigravityService, "PitStop-gemini-antigravity")

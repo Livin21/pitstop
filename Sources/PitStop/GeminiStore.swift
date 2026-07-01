@@ -120,7 +120,7 @@ final class GeminiStore {
     @discardableResult
     func captureCurrent() async throws -> Bool {
         var touched = false
-        let cliBlob = liveCliBlob()
+        let cliBlob = liveCliBlob().map(Gemini.normalizedBlob)
         let cliEmail = cliBlob.flatMap(Gemini.cliCreds(from:))?.email
         let agBlob = await liveAntigravityBlob()
         // The Antigravity blob has no identity; its account is the shared active

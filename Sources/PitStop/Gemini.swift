@@ -41,6 +41,19 @@ enum Gemini {
         goKeyringPrefix + json.base64EncodedString()
     }
 
+    /// Re-serialize a CLI creds blob as compact, key-sorted JSON. The keychain
+    /// read path (`security -w`) hex-encodes any secret containing newlines,
+    /// and the Gemini CLI writes oauth_creds.json pretty-printed — so it must
+    /// be flattened before it's stored (same rationale as Codex.normalizedBlob).
+    static func normalizedBlob(_ data: Data) -> Data {
+        guard let obj = try? JSONSerialization.jsonObject(with: data),
+              let compact = try? JSONSerialization.data(withJSONObject: obj,
+                                                        options: [.sortedKeys]) else {
+            return data
+        }
+        return compact
+    }
+
     /// Parse the Gemini CLI `oauth_creds.json` blob.
     static func cliCreds(from blob: Data) -> Creds? {
         guard let root = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],

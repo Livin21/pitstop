@@ -73,7 +73,35 @@ enum Keychain {
         }
         var data = r.out
         if data.last == 0x0A { data.removeLast() }   // `-w` appends a newline
-        return data
+        return dehexed(data)
+    }
+
+    /// `security find-generic-password -w` prints a value hex-encoded when it
+    /// contains bytes outside plain printable ASCII (e.g. the newlines of a
+    /// pretty-printed JSON blob stored before PitStop normalized blobs).
+    /// Decode only when the raw value isn't itself a credential shape but the
+    /// hex-decoded bytes are — so a real secret that merely looks hexy is safe.
+    static func dehexed(_ data: Data) -> Data {
+        guard data.count >= 2, data.count % 2 == 0,
+              !looksLikeCredential(data),
+              let text = String(data: data, encoding: .utf8),
+              text.allSatisfy(\.isHexDigit) else { return data }
+        var bytes = [UInt8](); bytes.reserveCapacity(data.count / 2)
+        var idx = text.startIndex
+        while idx < text.endIndex {
+            let next = text.index(idx, offsetBy: 2)
+            guard let b = UInt8(text[idx..<next], radix: 16) else { return data }
+            bytes.append(b)
+            idx = next
+        }
+        let decoded = Data(bytes)
+        return looksLikeCredential(decoded) ? decoded : data
+    }
+
+    private static func looksLikeCredential(_ data: Data) -> Bool {
+        if (try? JSONSerialization.jsonObject(with: data)) != nil { return true }
+        guard let s = String(data: data, encoding: .utf8) else { return false }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("go-keyring-base64:")
     }
 
     /// Write a profile item. Delete + add (rather than `-U`) so the item ends
