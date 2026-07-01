@@ -118,7 +118,7 @@ enum Updater {
         NSApp.terminate(nil)
     }
 
-    private static func run(_ tool: String, _ args: [String]) throws {
+    static func run(_ tool: String, _ args: [String]) throws {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: tool)
         p.arguments = args
@@ -130,9 +130,21 @@ enum Updater {
         p.standardOutput = outPipe
         p.standardError = errPipe
         try p.run()
-        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let err = errPipe.fileHandleForReading.readDataToEndOfFile()
+        // Drain both pipes concurrently: a sequential read-to-end deadlocks
+        // when the child fills the other pipe's buffer (e.g. swift build
+        // warnings on stderr) and blocks in write() before closing stdout.
+        var out = Data(), err = Data()
+        let drained = DispatchGroup()
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            out = outPipe.fileHandleForReading.readDataToEndOfFile(); drained.leave()
+        }
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            err = errPipe.fileHandleForReading.readDataToEndOfFile(); drained.leave()
+        }
         p.waitUntilExit()
+        drained.wait()
         guard p.terminationStatus == 0 else {
             let combined = ((String(data: err, encoding: .utf8) ?? "")
                 + (String(data: out, encoding: .utf8) ?? ""))

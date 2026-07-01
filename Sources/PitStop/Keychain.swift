@@ -49,9 +49,20 @@ enum Keychain {
                     cont.resume(throwing: Failure(message: "Couldn't run security: \(error.localizedDescription)"))
                     return
                 }
-                let out = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let err = errPipe.fileHandleForReading.readDataToEndOfFile()
+                // Drain both pipes concurrently — a sequential read-to-end
+                // deadlocks if the child fills the other pipe's buffer.
+                var out = Data(), err = Data()
+                let drained = DispatchGroup()
+                drained.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    out = outPipe.fileHandleForReading.readDataToEndOfFile(); drained.leave()
+                }
+                drained.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    err = errPipe.fileHandleForReading.readDataToEndOfFile(); drained.leave()
+                }
                 p.waitUntilExit()
+                drained.wait()
                 cont.resume(returning: (p.terminationStatus, out, String(data: err, encoding: .utf8) ?? ""))
             }
         }
