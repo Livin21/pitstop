@@ -133,4 +133,98 @@ enum UsageAPI {
         let expiresAtMs = (Date().timeIntervalSince1970 + expiresIn) * 1000
         return (access, root["refresh_token"] as? String, expiresAtMs)
     }
+
+    // MARK: - Fresh login (authorization_code)
+
+    /// Anthropic OAuth token hosts, tried in order — the current `platform`
+    /// host first, then the legacy `console` host PitStop's refresh already
+    /// uses. [verify] which accepts the authorization_code grant.
+    static let authorizeTokenHosts: [URL] = [
+        URL(string: "https://platform.claude.com/v1/oauth/token")!,
+        URL(string: "https://console.anthropic.com/v1/oauth/token")!,
+    ]
+
+    static let profileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
+
+    /// Build the authorization_code exchange request (JSON body, `state`
+    /// included — the shape Claude Code uses). Pure, for testing.
+    static func exchangeCodeRequest(code: String, state: String, verifier: String,
+                                    redirectURI: String, host: URL) -> URLRequest {
+        var req = URLRequest(url: host)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "grant_type": "authorization_code",
+            "code": code,
+            "state": state,
+            "client_id": clientID,
+            "redirect_uri": redirectURI,
+            "code_verifier": verifier,
+        ])
+        return req
+    }
+
+    /// Exchange an authorization code for tokens. Tries each host in order,
+    /// falling through on connection/host errors; a 4xx from a reachable host
+    /// is returned as `.unauthorized`.
+    static func exchangeCode(code: String, state: String, verifier: String,
+                             redirectURI: String) async throws
+        -> (accessToken: String, refreshToken: String?, expiresAtMs: Double) {
+        var lastError: Error = APIError.malformed
+        for host in authorizeTokenHosts {
+            do {
+                let req = exchangeCodeRequest(code: code, state: state, verifier: verifier,
+                                              redirectURI: redirectURI, host: host)
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                guard let http = resp as? HTTPURLResponse else { throw APIError.malformed }
+                if http.statusCode == 401 || http.statusCode == 403 || http.statusCode == 400 {
+                    throw APIError.unauthorized
+                }
+                guard http.statusCode == 200 else { throw APIError.http(http.statusCode) }
+                guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let access = root["access_token"] as? String,
+                      let expiresIn = (root["expires_in"] as? NSNumber)?.doubleValue else {
+                    throw APIError.malformed
+                }
+                let expiresAtMs = (Date().timeIntervalSince1970 + expiresIn) * 1000
+                return (access, root["refresh_token"] as? String, expiresAtMs)
+            } catch let error as APIError {
+                // A definitive auth rejection shouldn't fall through to the next host.
+                if case .unauthorized = error { throw error }
+                lastError = error
+            } catch {
+                lastError = error   // connection/DNS — try the next host
+            }
+        }
+        throw lastError
+    }
+
+    /// Build the identity (profile) request. Pure, for testing.
+    static func profileRequest(accessToken: String) -> URLRequest {
+        var req = URLRequest(url: profileURL)
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 15
+        return req
+    }
+
+    /// Fetch the authenticated account's email. [verify] endpoint/shape — used
+    /// only to confirm the re-login matches the target row.
+    static func fetchAccountEmail(accessToken: String) async throws -> String {
+        let (data, resp) = try await URLSession.shared.data(for: profileRequest(accessToken: accessToken))
+        guard let http = resp as? HTTPURLResponse else { throw APIError.malformed }
+        if http.statusCode == 401 || http.statusCode == 403 { throw APIError.unauthorized }
+        guard http.statusCode == 200,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.http(http.statusCode)
+        }
+        // Accept a couple of plausible shapes: top-level `email`/`email_address`,
+        // or nested under `account`.
+        if let e = root["email"] as? String ?? root["email_address"] as? String { return e }
+        if let account = root["account"] as? [String: Any],
+           let e = account["email_address"] as? String ?? account["email"] as? String { return e }
+        throw APIError.malformed
+    }
 }
