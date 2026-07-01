@@ -6,6 +6,27 @@ appear on [GitHub Releases](https://github.com/Livin21/pitstop/releases).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-02
+### Changed
+- Transient fetch errors (e.g. a rate limit) with data under 10 minutes old
+  now render as a muted info line without the "showing … data" caveat — the
+  orange ⚠︎ is reserved for needs-action errors and genuinely stale data.
+  Stale-data timestamps no longer include seconds.
+- The "on pace to hit limit" projection only appears once a window is ≥25%
+  used or the projected limit is within 3 hours, so a barely-used window
+  can't cry wolf.
+- The live Codex row waiting on a fresh token shows its last-known usage
+  bars dimmed with a "Last seen …" stamp, instead of a sentence about
+  PitStop's token mechanics and no bars.
+
+### Fixed
+- Dangling "Extra –" on rows where extra usage is enabled but reports no
+  utilization yet.
+- Long bar labels (Gemini model names like "2.5-flash-lite") no longer spill
+  into the leading margin — labels get a real gutter and the row's bars
+  shift right with a fixed right edge, keeping the % and reset columns
+  aligned across rows.
+
 ## [0.4.0] - 2026-07-02
 ### Added
 - **Per-model scoped weekly limits** (e.g. **Fable**), parsed from the usage
@@ -95,7 +116,8 @@ First versioned release.
 ### Fixed
 - Fall back to Desktop usage when a merged account's Claude Code fetch fails.
 
-[Unreleased]: https://github.com/Livin21/pitstop/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Livin21/pitstop/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Livin21/pitstop/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Livin21/pitstop/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Livin21/pitstop/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Livin21/pitstop/compare/v0.2.1...v0.3.0
