@@ -27,9 +27,12 @@ Useful flags on the binary (great for testing without the GUI):
 - `--preview` — render sample account rows to `/tmp/pitstop-preview.png`.
 - `--screenshot` — run with masked sample emails, for docs captures.
 
-There are no automated tests; verify changes by building, running `--check`,
-and exercising the menu. (An ad-hoc-signed rebuild keeps its keychain grant,
-since access rides the Apple-signed `/usr/bin/security`.)
+Run the test suite with `swift test` — XCTest, one file per topic under
+`Tests/PitStopTests/`. Logic changes should come with tests (parsing,
+filtering, and decision layers are covered that way); UI and data-layer
+changes are still verified by building, running `--check`, and exercising
+the menu. (An ad-hoc-signed rebuild keeps its keychain grant, since access
+rides the Apple-signed `/usr/bin/security`.)
 
 ## Code style
 
@@ -48,7 +51,8 @@ The app is provider-generic. Roughly: add a `Provider` case and title, a
 `<Name>.swift` that fetches usage (plus a `<Name>Store.swift` if it's
 switchable), then wire it into `accountsForMenu` / `refreshAll` / the menu-bar
 reading and namespace its keys. `Codex.swift` and `CodexStore.swift` are the
-template to copy.
+template to copy; `Gemini.swift` / `GeminiStore.swift` show the same pattern
+stretched over a two-surface provider (CLI + Antigravity).
 
 ## Security
 
