@@ -1172,25 +1172,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// When enabled, flip each switchable provider's live account to the saved
     /// account with the most headroom once the live one crosses the threshold.
-    /// Desktop is read-only, so it's left alone.
+    /// Only windows of the user-enabled limit kinds participate — both for the
+    /// trigger and for ranking targets (nil = no enabled window with data, so
+    /// the account neither triggers nor is a target). Desktop is read-only,
+    /// so it's left alone.
     private func evaluateAutoSwitch() {
         guard Settings.autoSwitchEnabled else { return }
+        let kinds = Settings.autoSwitchKinds
         autoSwitch(provider: .claude, live: activeEmail,
                    candidates: store.profiles.map(\.email),
-                   utilization: { fetchError[$0] == nil ? usage[$0]?.maxUtilization : nil },
+                   utilization: { fetchError[$0] == nil ? usage[$0]?.maxUtilization(kinds: kinds) : nil },
                    perform: { performSwitch(to: $0, auto: true, reason: $1) })
         autoSwitch(provider: .codex, live: codexLiveEmail,
                    candidates: codexStore.profiles.map(\.email),
                    utilization: {
                        let key = "codex:\($0)"
-                       return fetchError[key] == nil ? codexUsage[key]?.maxUtilization : nil
+                       return fetchError[key] == nil ? codexUsage[key]?.maxUtilization(kinds: kinds) : nil
                    },
                    perform: { performCodexSwitch(to: $0, auto: true, reason: $1) })
         autoSwitch(provider: .gemini, live: geminiLiveCliEmail,
                    candidates: geminiStore.profiles.map(\.email),
                    utilization: {
                        let key = "gemini:\($0)"
-                       return fetchError[key] == nil ? geminiUsage[key]?.maxUtilization : nil
+                       return fetchError[key] == nil ? geminiUsage[key]?.maxUtilization(kinds: kinds) : nil
                    },
                    perform: { performGeminiSwitch(to: $0, auto: true, reason: $1) })
     }
