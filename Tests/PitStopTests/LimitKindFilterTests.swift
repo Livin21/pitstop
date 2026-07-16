@@ -45,4 +45,35 @@ final class LimitKindFilterTests: XCTestCase {
         XCTAssertEqual(r.maxUtilization(kinds: [.session, .weekly]), 20)
         XCTAssertNil(r.maxUtilization(kinds: [.session]))
     }
+
+    // MARK: Codex
+
+    private func codexUsage(_ windows: [(String, Double)]) -> Codex.Usage {
+        Codex.Usage(windows: windows.map {
+            .init(label: $0.0, usedPercent: $0.1, resetsAt: nil)
+        })
+    }
+
+    func testCodexFiveHourIsSession() {
+        let u = codexUsage([("5h", 91), ("7d", 40)])
+        XCTAssertEqual(u.maxUtilization(kinds: [.session]), 91)
+        XCTAssertEqual(u.maxUtilization(kinds: [.weekly]), 40)
+    }
+
+    func testCodexThirtyDayCountsAsWeekly() {
+        let u = codexUsage([("30d", 77)])
+        XCTAssertEqual(u.maxUtilization(kinds: [.weekly]), 77)
+        XCTAssertNil(u.maxUtilization(kinds: [.session]))
+    }
+
+    func testCodexUnknownLabelFallsToWeekly() {
+        let u = codexUsage([("90d", 55)])
+        XCTAssertEqual(u.maxUtilization(kinds: [.weekly]), 55)
+        XCTAssertNil(u.maxUtilization(kinds: [.session, .perModel]))
+    }
+
+    func testCodexPerModelNeverMatches() {
+        let u = codexUsage([("5h", 91), ("7d", 40)])
+        XCTAssertNil(u.maxUtilization(kinds: [.perModel]))
+    }
 }

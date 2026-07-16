@@ -41,6 +41,15 @@ enum Codex {
         var windows: [Window]
         var fetchedAt = Date()
         var maxUtilization: Double { windows.map(\.usedPercent).max() ?? 0 }
+
+        /// Auto-switch's filtered view. Codex windows are account-wide
+        /// duration windows: "5h" is the session kind; "7d"/"30d" — and
+        /// anything unrecognized — count as weekly, the safer long-window
+        /// bucket. nil when no enabled window exists.
+        func maxUtilization(kinds: Set<LimitKind>) -> Double? {
+            windows.filter { kinds.contains($0.label == "5h" ? .session : .weekly) }
+                .map(\.usedPercent).max()
+        }
     }
 
     enum CodexError: LocalizedError {
