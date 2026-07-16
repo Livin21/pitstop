@@ -1,6 +1,6 @@
 ---
 name: verify
-description: How to build, run, and E2E-verify PitStop changes — headless --check mode, menu-bar app driving, and the poisoned-profile simulation recipe.
+description: How to build, run, and E2E-verify PitStop changes — headless --check mode, menu-bar app driving, and the poisoned-profile, usage-cache, and session-warming recipes.
 ---
 
 # Verifying PitStop changes
@@ -58,7 +58,7 @@ Replicates "app relaunched during a 429" without touching the network:
 
 - Warm request shape can be tested standalone: extract a saved account's
   access token from its `PitStop-profile` keychain blob and POST the
-  1-token request from `SessionWarmer.warmRequest` — expect HTTP 200.
+  1-token request from `SessionWarmer.warmRequest` — expect a 2xx.
 - Live check: enable "Keep Claude sessions started" with the window
   covering now. An account whose 5-hour window has lapsed warms on the next
   2-min cycle — its reset jumps to ≈ now + 5 h; accounts with running

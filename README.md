@@ -17,7 +17,7 @@ Accounts are grouped into a section per provider — **Claude**, **Codex**, and
 **Gemini**. Within each section the live account is marked with a
 coral dot and listed first, then the rest by headroom (emptiest next — the one
 you'd switch to). Hovering a switchable row flips its plan chip into a coral
-**Switch** pill. A small tag on each row names the surface — **Code**,
+**Switch** pill. A small tag on each row names the surface — e.g. **Code**,
 **Desktop**, or **Code · Desktop** — so you can tell a switchable CLI account
 from a read-only Desktop one at a glance. The menu bar shows the active Claude
 Code account's binding limit, color-coded.
@@ -163,15 +163,17 @@ Or set it up manually:
 - **Google Gemini** covers two surfaces with one Google login: the `gemini`
   CLI keeps its OAuth credential in `~/.gemini/oauth_creds.json` (active
   account in `google_accounts.json`), Antigravity keeps a go-keyring blob in
-  the keychain (item `gemini`/`antigravity`). Identity and plan come from
-  Google's Code Assist backend (`cloudcode-pa.googleapis.com` —
-  `loadCodeAssist`); usage comes from `retrieveUserQuota`, each model's
-  remaining daily quota. Switching mirrors the other providers: snapshots
-  live in the keychain (services `PitStop-gemini-cli` /
-  `PitStop-gemini-antigravity`, one item per email), and a switch writes the
-  chosen account's blobs back into the CLI files and/or the Antigravity
-  keychain item — whichever surfaces that account was saved from. Inactive
-  snapshots are kept fresh via Google's OAuth refresh grant, like Codex's.
+  the keychain (item `gemini`/`antigravity`). Plan (and the Code Assist
+  project) come from Google's Code Assist backend
+  (`cloudcode-pa.googleapis.com` — `loadCodeAssist`); identity is the
+  active email in `google_accounts.json` (falling back to the CLI blob's
+  `id_token`); usage comes from `retrieveUserQuota`, each model's remaining
+  daily quota. Switching mirrors the other providers: snapshots live in the
+  keychain (services `PitStop-gemini-cli` / `PitStop-gemini-antigravity`,
+  one item per email), and a switch writes the chosen account's blobs back
+  into the CLI files and/or the Antigravity keychain item — whichever
+  surfaces that account was saved from. Inactive snapshots are kept fresh
+  via Google's OAuth refresh grant, like Codex's.
 - **All keychain access goes through `/usr/bin/security`** — the same CLI
   Claude Code shells out to. One "Always Allow" grant (enter the keychain
   password when prompted) covers both apps and survives PitStop rebuilds,
@@ -206,8 +208,9 @@ it once while PitStop runs:
 
 ## What switching means for running sessions
 
-After a switch, the live credential (Claude Code's keychain item, or Codex's
-`~/.codex/auth.json`) points at the new account:
+After a switch, the live credential (Claude Code's keychain item, Codex's
+`~/.codex/auth.json`, or Gemini's `~/.gemini` files / `gemini` keychain item)
+points at the new account:
 
 - **New sessions** use the new account immediately.
 - **Running Claude Code sessions** keep working on the old in-memory token
