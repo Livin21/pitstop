@@ -1,5 +1,17 @@
 import Foundation
 
+/// A limit window's kind, for the auto-switch "Trigger on" checkboxes.
+/// Every provider's windows classify into one of these; see the
+/// `maxUtilization(kinds:)` methods on each usage type.
+enum LimitKind: CaseIterable {
+    /// Short account-wide windows: Claude's 5-hour, Codex's 5h.
+    case session
+    /// Long account-wide windows: Claude's weekly, Codex's 7d/30d.
+    case weekly
+    /// Per-model caps: Claude's scoped limits (Fable, …), all Gemini quotas.
+    case perModel
+}
+
 /// What the menu bar number tracks.
 enum MenuBarSource: String, CaseIterable {
     /// The Claude Code account you're currently logged into (default).
@@ -36,6 +48,21 @@ enum Settings {
         return v == 0 ? 90 : v
     }
 
+    /// Which limit kinds may trigger an auto-switch and rank its targets.
+    /// Absent keys read as enabled, so the default is all kinds — today's
+    /// behavior — and unchecking is the opt-out.
+    static var autoSwitchKinds: Set<LimitKind> {
+        func enabled(_ key: String) -> Bool {
+            UserDefaults.standard.object(forKey: key) == nil
+                ? true : UserDefaults.standard.bool(forKey: key)
+        }
+        var kinds: Set<LimitKind> = []
+        if enabled("autoSwitchOnSession") { kinds.insert(.session) }
+        if enabled("autoSwitchOnWeekly") { kinds.insert(.weekly) }
+        if enabled("autoSwitchOnPerModel") { kinds.insert(.perModel) }
+        return kinds
+    }
+
     /// Show a "≈ full HH:MM at this pace" projection on rows trending toward a
     /// limit. On by default; only renders when the trend is meaningful.
     static var showProjection: Bool {
@@ -47,5 +74,6 @@ enum Settings {
     static let observedKeys = [
         "indicatorStyle", "indicatorMetric", "menuBarSource",
         "autoSwitchEnabled", "autoSwitchThreshold", "showProjection",
+        "autoSwitchOnSession", "autoSwitchOnWeekly", "autoSwitchOnPerModel",
     ]
 }
