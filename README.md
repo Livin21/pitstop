@@ -107,6 +107,11 @@ Or set it up manually:
   (Fable, Gemini quotas) — for both the trigger and the target ranking. It
   only moves onto accounts with trustworthy fresh data, and a per-provider
   cooldown prevents flapping; Desktop is read-only and left alone.
+- **Session warming** (off by default) starts a 5-hour session on every
+  saved Claude account whenever none is running during your configured
+  hours (default 6 AM–6 PM), so limit resets land inside your day instead
+  of at its end. Costs about one token per account per session; caps are
+  unaffected — it only chooses when the session clock starts.
 - **Time-to-limit projection** (on by default) samples usage over time and,
   when a window is trending toward full *before* it resets, shows
   "↗ on pace to hit limit ~3:40 PM" on the row.

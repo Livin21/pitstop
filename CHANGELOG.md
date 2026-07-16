@@ -12,6 +12,11 @@ appear on [GitHub Releases](https://github.com/Livin21/pitstop/releases).
   trigger nor count when ranking the account to switch to. All kinds stay
   enabled by default. Gemini's limits are all per-model, so unchecking
   per-model turns Gemini auto-switch off.
+- **Session warming.** Opt-in: during configured hours (default 6 AM–6 PM),
+  PitStop starts a 5-hour session on every saved Claude account whenever
+  none is running, so limit resets land inside your day instead of at its
+  end. One ~1-token request per account per session; caps are unaffected —
+  it only chooses when the session clock starts.
 
 ### Fixed
 - **Blank panel after a relaunch that hit a rate limit.** Usage data lived
