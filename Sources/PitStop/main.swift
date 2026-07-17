@@ -14,13 +14,14 @@ if CommandLine.arguments.contains("--check") {
             print("capture failed: \(error.localizedDescription)")
         }
         store.load()
-        let active = ClaudeConfig.activeEmail() ?? "<none>"
-        print("active account: \(active)")
+        let active = ClaudeConfig.activeIdentity()
+        let activeDescription = active.map { "\($0.email) [\($0.organizationUUID)]" } ?? "<none>"
+        print("active account: \(activeDescription)")
         for profile in store.profiles {
-            let isActive = profile.email == active
+            let isActive = profile.identity == active
             print("\n\(isActive ? "●" : "○") \(profile.email)  [\(profile.planLabel)]")
             do {
-                guard let blob = try await store.blob(for: profile.email, isActive: isActive) else {
+                guard let blob = try await store.blob(for: profile, isActive: isActive) else {
                     print("   no stored credentials")
                     continue
                 }
@@ -31,7 +32,7 @@ if CommandLine.arguments.contains("--check") {
                     let patched = try CredentialBlob.patching(
                         blob, accessToken: fresh.accessToken,
                         refreshToken: fresh.refreshToken, expiresAtMs: fresh.expiresAtMs)
-                    try await store.storeRefreshedBlob(patched, email: profile.email, isActive: isActive)
+                    try await store.storeRefreshedBlob(patched, profile: profile, isActive: isActive)
                     creds.accessToken = fresh.accessToken
                 }
                 let report = try await UsageAPI.fetchUsage(accessToken: creds.accessToken)
@@ -45,7 +46,7 @@ if CommandLine.arguments.contains("--check") {
         // Claude Desktop (observe-only — its claude.ai session).
         do {
             if let (acct, report) = try await ClaudeDesktop.poll() {
-                let dup = store.profiles.contains { $0.email == acct.email }
+                let dup = store.profiles.contains { $0.key == acct.key }
                     ? "  (also a saved Code account)" : ""
                 print("\n▣ \(acct.email)  [\(acct.planLabel)]  · Desktop\(dup)")
                 print("   5-hour  \(Format.percent(report.fiveHour?.utilization))  \(Format.reset(report.fiveHour?.resetsAt))")

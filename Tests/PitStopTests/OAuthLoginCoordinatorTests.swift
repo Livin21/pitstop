@@ -8,10 +8,12 @@ final class FakeAdapter: LoginAdapter, @unchecked Sendable {
     var loopbackPath: String { "/callback" }
     var supportsPaste: Bool { false }
     var pasteRedirectURI: String { "" }
-    var identityToReturn = LoginIdentity(email: "match@example.com", accountID: nil)
-    var persistedEmails: [String] = []
+    var identityToReturn = LoginIdentity(email: "match@example.com", accountID: nil,
+                                         organizationID: nil)
+    var persistedTargets: [LoginTarget] = []
 
-    func authorizeURL(challenge: String, state: String, redirectURI: String, pasteMode: Bool) -> URL {
+    func authorizeURL(challenge: String, state: String, redirectURI: String,
+                      pasteMode: Bool, target: LoginTarget) -> URL {
         URL(string: "https://example.com/authorize")!
     }
     func exchange(code: String, state: String, verifier: String, redirectURI: String) async throws -> FreshTokens {
@@ -19,38 +21,50 @@ final class FakeAdapter: LoginAdapter, @unchecked Sendable {
     }
     func identity(from tokens: FreshTokens) async throws -> LoginIdentity { identityToReturn }
     func buildBlob(old: Data, tokens: FreshTokens) throws -> Data { Data() }
-    func persist(_ tokens: FreshTokens, email: String) async throws { persistedEmails.append(email) }
+    func persist(_ tokens: FreshTokens, target: LoginTarget) async throws {
+        persistedTargets.append(target)
+    }
 }
 
 final class OAuthLoginCoordinatorTests: XCTestCase {
-    func testEmailMatchNormalizes() {
-        XCTAssertTrue(OAuthLoginCoordinator.emailMatches(
-            expected: "User@Example.com ", LoginIdentity(email: "user@example.com", accountID: nil)))
-        XCTAssertFalse(OAuthLoginCoordinator.emailMatches(
-            expected: "a@x.com", LoginIdentity(email: "b@x.com", accountID: nil)))
+    func testIdentityMatchNormalizesEmailAndChecksOrganization() {
+        let target = LoginTarget(email: "User@Example.com ", organizationID: "ORG-A",
+                                 credentialAccount: "slot")
+        XCTAssertTrue(OAuthLoginCoordinator.identityMatches(
+            target: target, LoginIdentity(email: "user@example.com", accountID: nil,
+                                          organizationID: "org-a")))
+        XCTAssertFalse(OAuthLoginCoordinator.identityMatches(
+            target: target, LoginIdentity(email: "user@example.com", accountID: nil,
+                                          organizationID: "org-b")))
+        XCTAssertFalse(OAuthLoginCoordinator.identityMatches(
+            target: target, LoginIdentity(email: "b@x.com", accountID: nil,
+                                          organizationID: "org-a")))
     }
 
     func testFinishPersistsOnMatch() async throws {
         let a = FakeAdapter()
+        let target = LoginTarget(email: "match@example.com", credentialAccount: "saved-slot")
         try await OAuthLoginCoordinator().finish(
-            adapter: a, expectedEmail: "match@example.com",
+            adapter: a, target: target,
             code: "C", state: "S", verifier: "V", redirectURI: "http://localhost:51900/callback")
-        XCTAssertEqual(a.persistedEmails, ["match@example.com"])
+        XCTAssertEqual(a.persistedTargets, [target])
     }
 
     func testFinishRejectsOnMismatch() async {
         let a = FakeAdapter()
-        a.identityToReturn = LoginIdentity(email: "other@example.com", accountID: nil)
+        a.identityToReturn = LoginIdentity(email: "other@example.com", accountID: nil,
+                                           organizationID: nil)
         do {
             try await OAuthLoginCoordinator().finish(
-                adapter: a, expectedEmail: "match@example.com",
+                adapter: a,
+                target: LoginTarget(email: "match@example.com", credentialAccount: "slot"),
                 code: "C", state: "S", verifier: "V", redirectURI: "x")
             XCTFail("expected mismatch")
         } catch {
             guard case LoginError.identityMismatch = error else {
                 return XCTFail("expected .identityMismatch, got \(error)")
             }
-            XCTAssertTrue(a.persistedEmails.isEmpty)   // nothing written
+            XCTAssertTrue(a.persistedTargets.isEmpty)   // nothing written
         }
     }
 }

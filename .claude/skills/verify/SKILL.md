@@ -27,12 +27,14 @@ description: How to build, run, and E2E-verify PitStop changes — headless --ch
 Replicates the "two accounts show the same usage" corruption safely:
 
 1. Back up `~/.config/pitstop/profiles.json`.
-2. Copy a real profile's blob:
-   `security find-generic-password -s "PitStop-profile" -a <real-email> -w`
+2. Copy a real profile's blob using that row's `credentialAccount` from
+   `profiles.json`:
+   `security find-generic-password -s "PitStop-profile" -a <credentialAccount> -w`
 3. File it under a fake email:
    `security add-generic-password -s "PitStop-profile" -a poisoned-test@example.com -w "<blob>"`
    and append a matching row to profiles.json (copy the real row, change
-   `email` + `oauthAccount.emailAddress`).
+   `email`, `oauthAccount.emailAddress`, `oauthAccount.organizationUuid`, and
+   `credentialAccount`).
 4. Quit installed app, launch dev binary, wait one cycle.
 5. Expect: fake keychain item deleted by the audit (`security find… -a
    poisoned-test@example.com` exits 44), row gated in the menu with
@@ -46,9 +48,10 @@ Replicates "app relaunched during a 429" without touching the network:
 
 1. Quit the installed app. `~/.config/pitstop/usage-cache.json` holds the
    display state (dates are seconds since 2001-01-01 — unix minus 978307200).
-2. Edit it: set `fetchError["<email>"] = "Rate limited"`,
-   `nextFetchAllowed["<email>"] = now + 600`, and age that account's
-   `usage[<email>].fetchedAt` back ~15 min.
+2. Edit it using the row's provider-namespaced account key: set
+   `fetchError["<account-key>"] = "Rate limited"`,
+   `nextFetchAllowed["<account-key>"] = now + 600`, and age that account's
+   `usage[<account-key>].fetchedAt` back ~15 min.
 3. Relaunch. Expect: the row still shows its bars, plus
    "⚠ Rate limited — retrying in 9m · showing <time> data"; the account is
    NOT re-fetched until the backoff passes (persisted backoff honored).

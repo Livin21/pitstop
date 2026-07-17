@@ -42,8 +42,9 @@ rides the Apple-signed `/usr/bin/security`.)
 - Keep it pure AppKit plus the small SwiftUI settings window. The app
   intentionally has **no third-party dependencies** — don't add one without a
   strong reason.
-- Per-account state is keyed by a provider-namespaced key (e.g. `codex:<email>`)
-  so accounts sharing an email across providers don't collide. Preserve that.
+- Per-account state is keyed by a provider-namespaced stable identity (e.g.
+  `codex:<email>` or Claude's email + organization UUID) so accounts sharing
+  an email across providers or Claude organizations don't collide. Preserve that.
 
 ## Adding a provider
 

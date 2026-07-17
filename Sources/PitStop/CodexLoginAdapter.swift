@@ -11,7 +11,8 @@ struct CodexLoginAdapter: LoginAdapter {
 
     static let scopes = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 
-    func authorizeURL(challenge: String, state: String, redirectURI: String, pasteMode: Bool) -> URL {
+    func authorizeURL(challenge: String, state: String, redirectURI: String,
+                      pasteMode: Bool, target: LoginTarget) -> URL {
         var c = URLComponents(string: "https://auth.openai.com/oauth/authorize")!
         c.queryItems = [
             URLQueryItem(name: "response_type", value: "code"),
@@ -39,7 +40,7 @@ struct CodexLoginAdapter: LoginAdapter {
               let id = Codex.identity(fromIDToken: idToken) else {
             throw LoginError.badResponse("Codex sign-in returned no id_token")
         }
-        return LoginIdentity(email: id.email, accountID: id.accountID)
+        return LoginIdentity(email: id.email, accountID: id.accountID, organizationID: nil)
     }
 
     func buildBlob(old: Data, tokens: FreshTokens) throws -> Data {
@@ -52,11 +53,13 @@ struct CodexLoginAdapter: LoginAdapter {
         return Codex.normalizedBlob(patched)
     }
 
-    func persist(_ tokens: FreshTokens, email: String) async throws {
-        guard let old = try await Keychain.read(service: CodexStore.service, account: email) else {
-            throw LoginError.noSavedProfile(email)
+    func persist(_ tokens: FreshTokens, target: LoginTarget) async throws {
+        guard let old = try await Keychain.read(service: CodexStore.service,
+                                                account: target.credentialAccount) else {
+            throw LoginError.noSavedProfile(target.email)
         }
         let blob = try buildBlob(old: old, tokens: tokens)
-        try await Keychain.upsert(service: CodexStore.service, account: email, data: blob)
+        try await Keychain.upsert(service: CodexStore.service,
+                                  account: target.credentialAccount, data: blob)
     }
 }

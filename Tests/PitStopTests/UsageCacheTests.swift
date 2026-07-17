@@ -86,4 +86,39 @@ final class UsageCacheTests: XCTestCase {
         try Data("not json".utf8).write(to: url)
         XCTAssertNil(UsageCache.load(from: url, now: Date()))
     }
+
+    func testMigratesBareEmailStateForOneClaudeOrganization() throws {
+        let now = Date()
+        var snap = sampleSnapshot(now: now)
+        snap.desktopAccount = ClaudeDesktop.Account(email: "a@x.com", orgUUID: "org-a",
+                                                    planLabel: "Team")
+        let oauth: [String: Any] = ["emailAddress": "a@x.com", "organizationUuid": "org-a"]
+        let id = ClaudeAccountIdentity(email: "a@x.com", organizationUUID: "org-a")
+        let p = Profile(email: "a@x.com", savedAt: now, subscriptionType: "team",
+                        rateLimitTier: nil, credentialAccount: "a@x.com", oauthAccount: oauth)
+
+        let migrated = snap.migratingLegacyClaudeKeys(profiles: [p])
+
+        XCTAssertNil(migrated.usage["a@x.com"])
+        XCTAssertNotNil(migrated.usage[id.key])
+        XCTAssertEqual(migrated.fetchError[id.key], "Rate limited")
+        XCTAssertEqual(migrated.failureCount[id.key], 2)
+        XCTAssertNotNil(migrated.nextFetchAllowed[id.key])
+    }
+
+    func testDoesNotCopyAmbiguousBareEmailStateToTwoOrganizations() throws {
+        let now = Date()
+        let snap = sampleSnapshot(now: now)
+        func make(_ org: String) -> Profile {
+            let oauth: [String: Any] = ["emailAddress": "a@x.com", "organizationUuid": org]
+            return Profile(email: "a@x.com", savedAt: now, subscriptionType: nil,
+                           rateLimitTier: nil, credentialAccount: org, oauthAccount: oauth)
+        }
+
+        let migrated = snap.migratingLegacyClaudeKeys(profiles: [make("org-a"), make("org-b")])
+
+        XCTAssertNotNil(migrated.usage["a@x.com"])
+        XCTAssertNil(migrated.usage[ClaudeAccountIdentity(email: "a@x.com",
+                                                          organizationUUID: "org-a").key])
+    }
 }
