@@ -2,10 +2,14 @@ import XCTest
 @testable import PitStop
 
 final class LoginAdapterTests: XCTestCase {
+    private let target = LoginTarget(email: "a@x.com", organizationID: "org-a",
+                                     credentialAccount: "slot")
+
     func testClaudeAuthorizeURLLoopback() throws {
         let url = ClaudeLoginAdapter().authorizeURL(
             challenge: "CH", state: "ST",
-            redirectURI: "http://localhost:51000/callback", pasteMode: false)
+            redirectURI: "http://localhost:51000/callback", pasteMode: false,
+            target: target)
         let c = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         XCTAssertEqual(c.host, "claude.ai")
         let q = Dictionary(uniqueKeysWithValues: (c.queryItems ?? []).map { ($0.name, $0.value ?? "") })
@@ -17,12 +21,14 @@ final class LoginAdapterTests: XCTestCase {
         XCTAssertEqual(q["redirect_uri"], "http://localhost:51000/callback")
         XCTAssertTrue((q["scope"] ?? "").contains("user:inference"))
         XCTAssertNil(q["code"])                       // no code=true in loopback mode
+        XCTAssertEqual(q["orgUUID"], "org-a")
     }
 
     func testClaudeAuthorizeURLPasteMode() throws {
         let url = ClaudeLoginAdapter().authorizeURL(
             challenge: "CH", state: "ST",
-            redirectURI: ClaudeLoginAdapter().pasteRedirectURI, pasteMode: true)
+            redirectURI: ClaudeLoginAdapter().pasteRedirectURI, pasteMode: true,
+            target: target)
         let q = Dictionary(uniqueKeysWithValues:
             (URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems ?? [])
             .map { ($0.name, $0.value ?? "") })
@@ -36,7 +42,8 @@ final class LoginAdapterTests: XCTestCase {
         XCTAssertEqual(a.loopbackPath, "/auth/callback")
         XCTAssertFalse(a.supportsPaste)
         let url = a.authorizeURL(challenge: "CH", state: "ST",
-                                 redirectURI: "http://localhost:1455/auth/callback", pasteMode: false)
+                                 redirectURI: "http://localhost:1455/auth/callback", pasteMode: false,
+                                 target: target)
         let c = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         XCTAssertEqual(c.host, "auth.openai.com")
         let q = Dictionary(uniqueKeysWithValues: (c.queryItems ?? []).map { ($0.name, $0.value ?? "") })

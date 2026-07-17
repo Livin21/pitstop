@@ -17,7 +17,8 @@ import Foundation
 /// Two services are involved:
 ///  - "Claude Code-credentials" — the live item Claude Code reads/writes.
 ///    Always updated in place (`-U`) to preserve the item and its ACL.
-///  - "PitStop-profile" — one item per saved account (account = email).
+///  - "PitStop-profile" — one item per saved account. Current Claude profiles
+///    use an email + organization key; legacy snapshots retain their email slot.
 ///    Recreated (staged add + delete + add) on write so the items are owned
 ///    by `security` itself and never prompt, without a window where a failed
 ///    write has destroyed the only copy.

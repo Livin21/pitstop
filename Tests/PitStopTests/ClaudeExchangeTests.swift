@@ -27,4 +27,21 @@ final class ClaudeExchangeTests: XCTestCase {
         XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer sk-ant-oat01-TOKEN")
         XCTAssertEqual(req.value(forHTTPHeaderField: "anthropic-beta"), "oauth-2025-04-20")
     }
+
+    func testProfileIdentityIncludesOrganization() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "account": ["email": "Same@Example.com"],
+            "organization": ["uuid": "ORG-TEAM"],
+        ])
+        XCTAssertEqual(try UsageAPI.parseAccountIdentity(data),
+                       ClaudeAccountIdentity(email: "same@example.com",
+                                             organizationUUID: "org-team"))
+    }
+
+    func testProfileIdentityRequiresOrganization() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "account": ["email": "same@example.com"],
+        ])
+        XCTAssertThrowsError(try UsageAPI.parseAccountIdentity(data))
+    }
 }

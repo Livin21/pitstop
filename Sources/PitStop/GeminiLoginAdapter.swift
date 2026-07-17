@@ -16,7 +16,8 @@ extension GeminiLoginAdapter {
     var supportsPaste: Bool { false }
     var pasteRedirectURI: String { "" }
 
-    func authorizeURL(challenge: String, state: String, redirectURI: String, pasteMode: Bool) -> URL {
+    func authorizeURL(challenge: String, state: String, redirectURI: String,
+                      pasteMode: Bool, target: LoginTarget) -> URL {
         var c = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
         c.queryItems = [
             .init(name: "client_id", value: client.id),
@@ -60,15 +61,17 @@ extension GeminiLoginAdapter {
         guard let idt = tokens.idToken, let email = Gemini.decodeJWTEmail(idt) else {
             throw LoginError.badResponse("Google sign-in returned no id_token email")
         }
-        return LoginIdentity(email: email, accountID: nil)
+        return LoginIdentity(email: email, accountID: nil, organizationID: nil)
     }
 
-    func persist(_ tokens: FreshTokens, email: String) async throws {
+    func persist(_ tokens: FreshTokens, target: LoginTarget) async throws {
         // Patch the saved blob when one exists — Google may omit refresh_token
         // on re-auth, and rebuilding from scratch would destroy the stored one.
-        let old = (try? await Keychain.read(service: profileService, account: email)) ?? Data()
+        let old = (try? await Keychain.read(service: profileService,
+                                            account: target.credentialAccount)) ?? Data()
         let blob = try buildBlob(old: old, tokens: tokens)
-        try await Keychain.upsert(service: profileService, account: email, data: blob)
+        try await Keychain.upsert(service: profileService,
+                                  account: target.credentialAccount, data: blob)
     }
 }
 

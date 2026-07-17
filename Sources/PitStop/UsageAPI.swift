@@ -265,21 +265,34 @@ enum UsageAPI {
         return req
     }
 
-    /// Fetch the authenticated account's email. [verify] endpoint/shape — used
-    /// only to confirm the re-login matches the target row.
-    static func fetchAccountEmail(accessToken: String) async throws -> String {
+    /// Parse the exact subscription identity returned by `/api/oauth/profile`.
+    /// Email alone is not unique: one user may have personal and team orgs.
+    static func parseAccountIdentity(_ data: Data) throws -> ClaudeAccountIdentity {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.malformed
+        }
+        let account = root["account"] as? [String: Any]
+        let organization = root["organization"] as? [String: Any]
+        guard let email = account?["email_address"] as? String
+                ?? account?["email"] as? String
+                ?? root["email_address"] as? String
+                ?? root["email"] as? String,
+              let organizationUUID = organization?["uuid"] as? String
+                ?? root["organization_uuid"] as? String else {
+            throw APIError.malformed
+        }
+        return ClaudeAccountIdentity(email: email, organizationUUID: organizationUUID)
+    }
+
+    /// Fetch the authenticated account and organization. Used to prevent a
+    /// same-email token from being filed under the wrong Claude organization.
+    static func fetchAccountIdentity(accessToken: String) async throws -> ClaudeAccountIdentity {
         let (data, resp) = try await URLSession.shared.data(for: profileRequest(accessToken: accessToken))
         guard let http = resp as? HTTPURLResponse else { throw APIError.malformed }
         if http.statusCode == 401 || http.statusCode == 403 { throw APIError.unauthorized }
-        guard http.statusCode == 200,
-              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard http.statusCode == 200 else {
             throw APIError.http(http.statusCode)
         }
-        // Accept a couple of plausible shapes: top-level `email`/`email_address`,
-        // or nested under `account`.
-        if let e = root["email"] as? String ?? root["email_address"] as? String { return e }
-        if let account = root["account"] as? [String: Any],
-           let e = account["email_address"] as? String ?? account["email"] as? String { return e }
-        throw APIError.malformed
+        return try parseAccountIdentity(data)
     }
 }

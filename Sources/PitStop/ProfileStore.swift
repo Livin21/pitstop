@@ -1,19 +1,29 @@
 import Foundation
 
-/// A saved Claude Code account. The secret credential blob lives in the
-/// keychain (service "PitStop-profile", account = email); this struct holds
-/// only non-secret metadata, persisted to ~/.config/pitstop/profiles.json.
+/// A saved Claude Code organization. The secret credential blob lives in the
+/// keychain; this struct holds only non-secret identity and storage metadata.
 struct Profile {
     var email: String
     var savedAt: Date
     var subscriptionType: String?
     var rateLimitTier: String?
+    /// Keychain account attribute. Old installs used the bare email; keeping
+    /// that slot preserves the one credential snapshot they could retain.
+    var credentialAccount: String
+    /// True once this exact email + organization pairing has been confirmed
+    /// against the stored token. Profiles from email-only versions default to
+    /// false so their first live capture cannot take the unchanged fast path.
+    var identityVerified: Bool
     /// The `oauthAccount` object from ~/.claude.json, kept verbatim so it can
     /// be restored exactly on switch.
     var oauthAccount: [String: Any]
 
     var displayName: String? { oauthAccount["displayName"] as? String }
     var organizationName: String? { oauthAccount["organizationName"] as? String }
+    var identity: ClaudeAccountIdentity? { ClaudeAccountIdentity(oauthAccount: oauthAccount) }
+    /// Profiles old enough to lack organizationUuid remain addressable until a
+    /// verified live capture upgrades them in place.
+    var key: String { identity?.key ?? "claude:legacy:\(email.lowercased())" }
 
     /// e.g. "Acme AI · Team · 5x" — drops auto-generated "<email>'s
     /// Organization" names and the noisy default_claude_ tier prefix.
@@ -36,6 +46,8 @@ struct Profile {
         var d: [String: Any] = [
             "email": email,
             "savedAt": savedAt.timeIntervalSince1970,
+            "credentialAccount": credentialAccount,
+            "identityVerified": identityVerified,
             "oauthAccount": oauthAccount,
         ]
         if let subscriptionType { d["subscriptionType"] = subscriptionType }
@@ -50,14 +62,27 @@ struct Profile {
         self.subscriptionType = dict["subscriptionType"] as? String
         self.rateLimitTier = dict["rateLimitTier"] as? String
         self.oauthAccount = dict["oauthAccount"] as? [String: Any] ?? [:]
+        // Backward compatibility: pre-org-aware snapshots live under email.
+        if let credentialAccount = dict["credentialAccount"] as? String,
+           !credentialAccount.isEmpty {
+            self.credentialAccount = credentialAccount
+        } else {
+            self.credentialAccount = email
+        }
+        // Pre-organization versions verified only the email. Missing means
+        // this pairing must pass one exact organization check after upgrade.
+        self.identityVerified = (dict["identityVerified"] as? Bool) ?? false
     }
 
     init(email: String, savedAt: Date, subscriptionType: String?,
-         rateLimitTier: String?, oauthAccount: [String: Any]) {
+         rateLimitTier: String?, credentialAccount: String,
+         identityVerified: Bool = true, oauthAccount: [String: Any]) {
         self.email = email
         self.savedAt = savedAt
         self.subscriptionType = subscriptionType
         self.rateLimitTier = rateLimitTier
+        self.credentialAccount = credentialAccount
+        self.identityVerified = identityVerified
         self.oauthAccount = oauthAccount
     }
 }
@@ -72,20 +97,23 @@ final class ProfileStore {
     /// from ~/.claude.json — two stores written by another program at
     /// different moments. These are the ways that pairing can be refused.
     enum CaptureError: LocalizedError {
-        /// The token provably belongs to a different account than the one
+        /// The token provably belongs to a different organization than the one
         /// ~/.claude.json names (a mid-switch read of crossed stores).
-        case mismatch(tokenOwner: String, configEmail: String)
+        case mismatch(tokenOwner: ClaudeAccountIdentity, configIdentity: ClaudeAccountIdentity)
         /// The token's owner couldn't be confirmed (network, expiry) — the
         /// pair might be fine, but filing it unverified risks poisoning.
         case unverifiable(String)
 
         var errorDescription: String? {
             switch self {
-            case .mismatch(let owner, let email):
+            case .mismatch(let owner, let expected):
+                let ownerDescription = owner.email.caseInsensitiveCompare(expected.email) == .orderedSame
+                    ? "another organization for \(owner.email)"
+                    : owner.email
                 return """
-                    The live Claude login belongs to \(owner), but ~/.claude.json \
-                    still names \(email) — saving that pair would file \(owner)'s \
-                    credentials under \(email). Run `claude` and use /login to sign \
+                    The live Claude login belongs to \(ownerDescription), but ~/.claude.json \
+                    still names \(expected.email) — saving that pair would file those \
+                    credentials under the wrong account. Run `claude` and use /login to sign \
                     in as the account you want live, then try again. Claude Desktop \
                     bundles its own Claude Code and can take the login over.
                     """
@@ -118,8 +146,9 @@ final class ProfileStore {
             try await Keychain.upsertLive(service: CredentialBlob.liveService, data: $0)
         }
         var oauthAccount: () -> [String: Any]? = { ClaudeConfig.oauthAccount() }
-        var verifyOwner: (String) async throws -> String = {
-            try await UsageAPI.fetchAccountEmail(accessToken: $0)
+        var setOauthAccount: ([String: Any]) throws -> Void = { try ClaudeConfig.setOauthAccount($0) }
+        var verifyIdentity: (String) async throws -> ClaudeAccountIdentity = {
+            try await UsageAPI.fetchAccountIdentity(accessToken: $0)
         }
         var refreshToken: (String) async throws
             -> (accessToken: String, refreshToken: String?, expiresAtMs: Double) = {
@@ -134,9 +163,13 @@ final class ProfileStore {
     /// The row-level error for a profile the identity audit gated: its saved
     /// credentials belonged to a different account and were deleted.
     struct ForeignCredentialsError: LocalizedError {
-        let owner: String
+        let owner: ClaudeAccountIdentity
+        let expected: ClaudeAccountIdentity
         var errorDescription: String? {
-            "Was showing \(owner)'s usage — sign in again"
+            if owner.email.caseInsensitiveCompare(expected.email) == .orderedSame {
+                return "Was showing another Claude organization's usage — sign in again"
+            }
+            return "Was showing \(owner.email)'s usage — sign in again"
         }
     }
 
@@ -152,19 +185,19 @@ final class ProfileStore {
         case verified
         /// The stored credentials belong to `owner`, not the profile's email;
         /// the poisoned copy has been deleted.
-        case poisoned(owner: String)
+        case poisoned(owner: ClaudeAccountIdentity)
         /// Couldn't reach the identity endpoint — audit again next cycle.
         case unverifiable
     }
 
     private(set) var profiles: [Profile] = []
     private let deps: Deps
-    /// Emails whose stored credentials passed this launch's identity audit.
-    private var auditedEmails: Set<String> = []
+    /// Account keys whose stored credentials passed this launch's identity audit.
+    private var auditedKeys: Set<String> = []
     /// The last owner check performed on the live credential item, cached
     /// against the exact bytes it ran on. Any rewrite of the item changes the
     /// bytes and invalidates it.
-    private var verifiedLive: (blob: Data, owner: String)?
+    private var verifiedLive: (blob: Data, owner: ClaudeAccountIdentity)?
 
     init(deps: Deps = Deps()) {
         self.deps = deps
@@ -173,12 +206,32 @@ final class ProfileStore {
 
     func load() {
         guard let data = try? Data(contentsOf: deps.file),
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let list = root["profiles"] as? [[String: Any]] else {
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var list = root["profiles"] as? [[String: Any]] else {
             profiles = []
             return
         }
-        profiles = list.compactMap(Profile.init(dict:)).sorted { $0.email < $1.email }
+
+        // Make the implicit pre-org-aware email slot explicit immediately.
+        // Future captures can then add a same-email organization without ever
+        // reinterpreting which keychain item owns this retained snapshot.
+        var migratedCredentialSlots = false
+        for index in list.indices {
+            guard let email = list[index]["email"] as? String,
+                  (list[index]["credentialAccount"] as? String)?.isEmpty != false else { continue }
+            list[index]["credentialAccount"] = email
+            migratedCredentialSlots = true
+        }
+        profiles = list.compactMap(Profile.init(dict:)).sorted {
+            ($0.email, $0.key) < ($1.email, $1.key)
+        }
+        if migratedCredentialSlots {
+            root["profiles"] = list
+            if let migrated = try? JSONSerialization.data(withJSONObject: root,
+                                                           options: [.prettyPrinted, .sortedKeys]) {
+                try? migrated.write(to: deps.file, options: .atomic)
+            }
+        }
     }
 
     private func save() throws {
@@ -193,29 +246,40 @@ final class ProfileStore {
     /// Snapshot the live Claude Code credentials + identity into a profile.
     /// Called on every refresh so the saved copy of the active account always
     /// holds the newest tokens. `profile` is nil when nobody is logged in;
-    /// `changed` reports whether new credentials were actually stored (so the
-    /// caller can notice an external re-login).
+    /// `changed` reports whether credentials or their exact identity verification
+    /// were stored (so the caller can notice an external re-login or migration).
     @discardableResult
     func captureCurrent() async throws -> (profile: Profile?, changed: Bool) {
         guard let blob = try await deps.readLive() else { return (nil, false) }
         guard let account = deps.oauthAccount(),
-              let email = account["emailAddress"] as? String else { return (nil, false) }
+              let identity = ClaudeAccountIdentity(oauthAccount: account) else { return (nil, false) }
+        let email = (account["emailAddress"] as? String) ?? identity.email
+
+        // Exact organization match first. A single pre-organization legacy
+        // row may be upgraded in place after its live token is verified.
+        let existingIndex = profiles.firstIndex { $0.identity == identity }
+            ?? profiles.firstIndex {
+                $0.identity == nil
+                    && $0.email.caseInsensitiveCompare(identity.email) == .orderedSame
+            }
 
         // Called on every refresh — skip the keychain/file writes when
         // nothing changed since the last capture.
-        if let existing = profiles.first(where: { $0.email == email }),
-           let storedBlob = try? await deps.readProfileBlob(email),
+        if let existingIndex,
+           profiles[existingIndex].identityVerified,
+           let storedBlob = try? await deps.readProfileBlob(profiles[existingIndex].credentialAccount),
            storedBlob == blob,
-           (existing.oauthAccount as NSDictionary) == (account as NSDictionary) {
-            return (existing, false)
+           (profiles[existingIndex].oauthAccount as NSDictionary) == (account as NSDictionary) {
+            return (profiles[existingIndex], false)
         }
 
         // The blob (keychain) and identity (~/.claude.json) are separate
         // stores that Claude Code writes at different moments — reading them
         // mid-switch pairs one account's tokens with another's email, and
         // filing that pair makes both rows report the same usage forever.
-        // Confirm the token's owner before filing; this only runs when the
-        // credentials actually changed, so it's not a per-cycle HTTP call.
+        // Confirm the token's owner before filing; this runs only when the
+        // credentials changed or a legacy pairing still needs its one-time
+        // organization check, so it is not a per-cycle HTTP call.
         var blobToStore = blob
         var creds = try CredentialBlob.parse(blob)
         if creds.isExpired {
@@ -238,9 +302,9 @@ final class ProfileStore {
             try await deps.writeLive(blobToStore)
             creds = try CredentialBlob.parse(blobToStore)
         }
-        let owner: String
+        let owner: ClaudeAccountIdentity
         do {
-            owner = try await deps.verifyOwner(creds.accessToken)
+            owner = try await deps.verifyIdentity(creds.accessToken)
         } catch {
             throw CaptureError.unverifiable(error.localizedDescription)
         }
@@ -248,57 +312,58 @@ final class ProfileStore {
         // asks the same question about the same bytes moments later, and a
         // crossed pair would otherwise re-verify on every refresh.
         verifiedLive = (blobToStore, owner)
-        guard owner.caseInsensitiveCompare(email) == .orderedSame else {
-            throw CaptureError.mismatch(tokenOwner: owner, configEmail: email)
+        guard owner == identity else {
+            throw CaptureError.mismatch(tokenOwner: owner, configIdentity: identity)
         }
 
-        try await deps.writeProfileBlob(email, blobToStore)
+        let credentialAccount = existingIndex.map { profiles[$0].credentialAccount } ?? identity.key
+        try await deps.writeProfileBlob(credentialAccount, blobToStore)
         let profile = Profile(email: email, savedAt: Date(),
                               subscriptionType: creds.subscriptionType,
                               rateLimitTier: creds.rateLimitTier,
+                              credentialAccount: credentialAccount,
+                              identityVerified: true,
                               oauthAccount: account)
-        profiles.removeAll { $0.email == email }
+        if let existingIndex { profiles.remove(at: existingIndex) }
         profiles.append(profile)
-        profiles.sort { $0.email < $1.email }
+        profiles.sort { ($0.email, $0.key) < ($1.email, $1.key) }
         try save()
         return (profile, true)
     }
 
-    /// Make `email` the live Claude Code account: snapshot whatever is
+    /// Make `key` the live Claude Code account: snapshot whatever is
     /// currently live, then write the profile's blob into the live keychain
     /// item and its identity into ~/.claude.json.
-    func switchTo(email: String) async throws {
+    func switchTo(key: String) async throws {
         // A failed snapshot aborts the switch: overwriting the live item
         // without a fresh copy of the outgoing account could lose its only
         // valid refresh token. (A nil return — nobody logged in — is fine.)
         _ = try await captureCurrent()
-        guard let profile = profiles.first(where: { $0.email == email }) else {
-            throw StoreError(message: "No saved profile for \(email)")
+        guard let profile = profiles.first(where: { $0.key == key }) else {
+            throw StoreError(message: "No saved Claude profile for \(key)")
         }
-        guard let blob = try await Keychain.read(service: CredentialBlob.profileService, account: email) else {
-            throw StoreError(message: "No saved credentials for \(email) — log in once with `claude` and save again")
+        guard let blob = try await deps.readProfileBlob(profile.credentialAccount) else {
+            throw StoreError(message: "No saved credentials for \(profile.email) — log in once with `claude` and save again")
         }
-        let previousLive = try await Keychain.read(service: CredentialBlob.liveService)
-        try await Keychain.upsertLive(service: CredentialBlob.liveService, data: blob)
+        let previousLive = try await deps.readLive()
+        try await deps.writeLive(blob)
         do {
-            try ClaudeConfig.setOauthAccount(profile.oauthAccount)
+            try deps.setOauthAccount(profile.oauthAccount)
         } catch {
             // Roll the live item back so the keychain and ~/.claude.json can't
             // disagree — captureCurrent refuses a mismatched pair, so leaving
             // one behind would block every capture until a manual re-login.
             if let previousLive {
-                try? await Keychain.upsertLive(service: CredentialBlob.liveService, data: previousLive)
+                try? await deps.writeLive(previousLive)
             }
             throw error
         }
     }
 
-    func remove(email: String) async throws {
-        try await Keychain.delete(service: CredentialBlob.profileService, account: email)
-        // Clean up any staging item a crashed write left behind.
-        try? await Keychain.delete(service: CredentialBlob.profileService,
-                                   account: Keychain.stagingAccount(for: email))
-        profiles.removeAll { $0.email == email }
+    func remove(key: String) async throws {
+        guard let profile = profiles.first(where: { $0.key == key }) else { return }
+        try await deps.deleteProfileBlob(profile.credentialAccount)
+        profiles.removeAll { $0.key == key }
         try save()
     }
 
@@ -307,24 +372,25 @@ final class ProfileStore {
     /// before capture-time verification existed hold another account's tokens
     /// under this email — both rows then report the same usage. Each email is
     /// checked once per launch (a passing audit is cached; failures are not).
-    func auditIdentity(email: String, accessToken: String) async -> AuditOutcome {
-        guard !auditedEmails.contains(email) else { return .verified }
-        let owner: String
+    func auditIdentity(profile: Profile, accessToken: String) async -> AuditOutcome {
+        guard !auditedKeys.contains(profile.key) else { return .verified }
+        guard let expected = profile.identity else { return .unverifiable }
+        let owner: ClaudeAccountIdentity
         do {
-            owner = try await deps.verifyOwner(accessToken)
+            owner = try await deps.verifyIdentity(accessToken)
         } catch {
             return .unverifiable
         }
-        guard owner.caseInsensitiveCompare(email) == .orderedSame else {
+        guard owner == expected else {
             // Drop the foreign copy — the rightful owner's tokens live under
             // their own profile (or the live item), so nothing real is lost,
             // and the row stops reporting another account's usage. The email
             // is deliberately not marked audited: post-re-login credentials
             // get checked afresh.
-            try? await deps.deleteProfileBlob(email)
+            try? await deps.deleteProfileBlob(profile.credentialAccount)
             return .poisoned(owner: owner)
         }
-        auditedEmails.insert(email)
+        auditedKeys.insert(profile.key)
         return .verified
     }
 
@@ -332,7 +398,7 @@ final class ProfileStore {
     ///
     /// For the account `~/.claude.json` names as active this prefers the live
     /// keychain item — Claude Code keeps that one fresh — but only once the
-    /// live blob is known to belong to `email`. The identity file and the
+    /// live blob is known to belong to this profile. The identity file and the
     /// keychain are separate stores written at different moments, and Claude
     /// Desktop ships its own copy of Claude Code that rewrites the very same
     /// live item, so the two genuinely disagree in practice. Using a live blob
@@ -341,20 +407,20 @@ final class ProfileStore {
     /// with theirs — which the identity audit then deletes as poisoned. When
     /// ownership isn't established the saved snapshot is used instead, which
     /// costs only freshness.
-    func blob(for email: String, isActive: Bool) async throws -> (data: Data, source: BlobSource)? {
-        let saved = try await deps.readProfileBlob(email)
+    func blob(for profile: Profile, isActive: Bool) async throws -> (data: Data, source: BlobSource)? {
+        let saved = try await deps.readProfileBlob(profile.credentialAccount)
         if isActive, let live = try await deps.readLive(),
-           await liveBelongs(to: email, blob: live, saved: saved) {
+           await liveBelongs(to: profile, blob: live, saved: saved) {
             return (live, .live)
         }
         guard let saved else { return nil }
         return (saved, .saved)
     }
 
-    /// Whether the live credential item's token belongs to `email`.
+    /// Whether the live credential item's token belongs to `profile`.
     ///
     /// Two cheap answers come first: bytes identical to the snapshot already
-    /// filed under this email (the steady state — nothing has touched the live
+    /// filed under this profile (the steady state — nothing has touched the live
     /// item since the last capture), then the cached result of a previous
     /// check on these same bytes. Only a live item that is genuinely new costs
     /// an HTTP call, and its answer is cached against those bytes, so a
@@ -364,28 +430,35 @@ final class ProfileStore {
     /// identity call — answers false. Falling back to the saved copy is the
     /// safe direction: `captureCurrent` refreshes and re-verifies an expired
     /// live item at the top of the next cycle anyway.
-    private func liveBelongs(to email: String, blob: Data, saved: Data?) async -> Bool {
+    private func liveBelongs(to profile: Profile, blob: Data, saved: Data?) async -> Bool {
+        guard let expected = profile.identity else { return false }
         if let saved, saved == blob { return true }
         if let cached = verifiedLive, cached.blob == blob {
-            return cached.owner.caseInsensitiveCompare(email) == .orderedSame
+            return cached.owner == expected
         }
         guard let creds = try? CredentialBlob.parse(blob), !creds.isExpired,
-              let owner = try? await deps.verifyOwner(creds.accessToken) else { return false }
+              let owner = try? await deps.verifyIdentity(creds.accessToken) else { return false }
         verifiedLive = (blob, owner)
-        return owner.caseInsensitiveCompare(email) == .orderedSame
+        return owner == expected
     }
 
     /// Persist a blob whose tokens we refreshed ourselves, back to wherever
     /// the blob came from. The saved snapshot always tracks the rotation; the
     /// live item is only rewritten when it was the source, so a refresh of an
     /// inactive account can't displace the live session.
-    func storeRefreshedBlob(_ data: Data, email: String, source: BlobSource) async throws {
-        try await deps.writeProfileBlob(email, data)
+    func storeRefreshedBlob(_ data: Data, profile: Profile, source: BlobSource) async throws {
+        try await deps.writeProfileBlob(profile.credentialAccount, data)
         if source == .live {
             try await deps.writeLive(data)
             // The rotation we just wrote is still this account's, so carry the
             // verification across rather than paying for it again next cycle.
-            verifiedLive = (data, email)
+            if let identity = profile.identity {
+                verifiedLive = (data, identity)
+            }
         }
+    }
+
+    func profile(forKey key: String) -> Profile? {
+        profiles.first { $0.key == key }
     }
 }
