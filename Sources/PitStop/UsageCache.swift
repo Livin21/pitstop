@@ -26,6 +26,34 @@ enum UsageCache {
         var nextFetchAllowed: [String: Date] = [:]
         var needsAction: Set<String> = []
         var desktopAccount: ClaudeDesktop.Account?
+
+        /// Move pre-org-aware bare-email Claude state only when that email has
+        /// one unambiguous organization. Ambiguous legacy state is left behind
+        /// and pruned after the first fresh cycle rather than copied to both.
+        func migratingLegacyClaudeKeys(profiles: [Profile]) -> Snapshot {
+            var copy = self
+            var candidates: [String: Set<String>] = [:]
+            for profile in profiles {
+                candidates[profile.email.lowercased(), default: []].insert(profile.key)
+            }
+            if let desktopAccount {
+                candidates[desktopAccount.email.lowercased(), default: []].insert(desktopAccount.key)
+            }
+            for (email, keys) in candidates where keys.count == 1 {
+                guard let key = keys.first, email != key else { continue }
+                func move<T>(_ dict: inout [String: T]) {
+                    if dict[key] == nil, let value = dict.removeValue(forKey: email) {
+                        dict[key] = value
+                    }
+                }
+                move(&copy.usage)
+                move(&copy.fetchError)
+                move(&copy.failureCount)
+                move(&copy.nextFetchAllowed)
+                if copy.needsAction.remove(email) != nil { copy.needsAction.insert(key) }
+            }
+            return copy
+        }
     }
 
     static func save(_ snapshot: Snapshot, to url: URL = file) throws {

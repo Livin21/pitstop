@@ -1,5 +1,28 @@
 import Foundation
 
+/// A Claude subscription is scoped to an organization, not just an email.
+/// The same Claude user can belong to multiple organizations whose usage and
+/// credentials must remain independent.
+struct ClaudeAccountIdentity: Hashable, Codable {
+    let email: String
+    let organizationUUID: String
+
+    init(email: String, organizationUUID: String) {
+        self.email = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.organizationUUID = organizationUUID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    init?(oauthAccount: [String: Any]) {
+        guard let email = oauthAccount["emailAddress"] as? String,
+              let organizationUUID = oauthAccount["organizationUuid"] as? String,
+              !email.isEmpty, !organizationUUID.isEmpty else { return nil }
+        self.init(email: email, organizationUUID: organizationUUID)
+    }
+
+    /// Opaque provider-namespaced key used by all per-account app state.
+    var key: String { "claude:\(email)#\(organizationUUID)" }
+}
+
 /// The decoded `claudeAiOauth` section of the Claude Code credential blob.
 struct OAuthCredentials {
     var accessToken: String
@@ -74,8 +97,8 @@ enum ClaudeConfig {
         return root["oauthAccount"] as? [String: Any]
     }
 
-    static func activeEmail() -> String? {
-        oauthAccount()?["emailAddress"] as? String
+    static func activeIdentity() -> ClaudeAccountIdentity? {
+        oauthAccount().flatMap(ClaudeAccountIdentity.init(oauthAccount:))
     }
 
     static func setOauthAccount(_ account: [String: Any]) throws {

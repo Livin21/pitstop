@@ -26,8 +26,9 @@ What shows up where:
 
 - **Claude Code** accounts are switchable. **Claude Desktop** (a *different*
   login) shows read-only, tagged **Desktop**; an account signed into both Code
-  and Desktop is one shared usage pool, so it stays a single row tagged
-  **Code · Desktop**.
+  and Desktop in the same organization is one shared usage pool, so it stays a
+  single row tagged **Code · Desktop**. The same email in multiple Claude
+  organizations stays separate, with its org/plan chip identifying each row.
 - **OpenAI Codex** accounts are switchable too — its login lives in
   `~/.codex/auth.json` (shared by the Codex CLI and the Codex app), which
   PitStop snapshots per account and swaps the same way it swaps the Claude
@@ -134,7 +135,8 @@ Or set it up manually:
   launch at login.
 - **Accounts** are snapshots of the Claude Code credential blob:
   - secrets live in the **keychain** (service `PitStop-profile`, one item
-    per account email) — never written to disk;
+    per email + Claude organization; upgraded installs retain their original
+    email-named item for the already-saved account) — never written to disk;
   - non-secret identity (email, org, plan) lives in
     `~/.config/pitstop/profiles.json`.
 - **Claude Desktop** (the chat app) is read separately and read-only. It
@@ -194,9 +196,10 @@ Or set it up manually:
 
 ## Adding a second account
 
-PitStop can only switch between accounts it has snapshotted, and it snapshots
-whatever is *live* on each refresh — so seed each account by being logged into
-it once while PitStop runs:
+PitStop can only switch between accounts/organizations it has snapshotted, and
+it snapshots whatever is *live* on each refresh — so seed each one by being
+logged into it once while PitStop runs. This includes two Claude organizations
+that use the same email:
 
 1. PitStop auto-saves whatever account is currently live.
 2. Sign in with the **other** account — Claude Code: run `/login`; Codex: run
@@ -204,7 +207,8 @@ it once while PitStop runs:
    sign in from the `gemini` CLI or Antigravity (both share the Google login).
 3. PitStop notices it on the next refresh and saves it too (for Claude you can
    also click **Save Current Account**).
-4. Both accounts now appear in the menu — click either to switch.
+4. Both accounts now appear in the menu — same-email Claude rows are
+   distinguished by their org/plan chips — and you can click either to switch.
 
 ## What switching means for running sessions
 

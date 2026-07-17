@@ -14,7 +14,8 @@ struct ClaudeLoginAdapter: LoginAdapter {
     static let scopes = "org:create_api_key user:profile user:inference "
         + "user:sessions:claude_code user:mcp_servers user:file_upload"
 
-    func authorizeURL(challenge: String, state: String, redirectURI: String, pasteMode: Bool) -> URL {
+    func authorizeURL(challenge: String, state: String, redirectURI: String,
+                      pasteMode: Bool, target: LoginTarget) -> URL {
         var c = URLComponents(string: "https://claude.ai/oauth/authorize")!
         var items = [
             URLQueryItem(name: "client_id", value: UsageAPI.clientID),
@@ -26,6 +27,9 @@ struct ClaudeLoginAdapter: LoginAdapter {
             URLQueryItem(name: "state", value: state),
         ]
         if pasteMode { items.insert(URLQueryItem(name: "code", value: "true"), at: 0) }
+        if let org = target.organizationID {
+            items.append(URLQueryItem(name: "orgUUID", value: org))
+        }
         c.queryItems = items
         return c.url!
     }
@@ -39,8 +43,9 @@ struct ClaudeLoginAdapter: LoginAdapter {
     }
 
     func identity(from tokens: FreshTokens) async throws -> LoginIdentity {
-        let email = try await UsageAPI.fetchAccountEmail(accessToken: tokens.accessToken)
-        return LoginIdentity(email: email, accountID: nil)
+        let identity = try await UsageAPI.fetchAccountIdentity(accessToken: tokens.accessToken)
+        return LoginIdentity(email: identity.email, accountID: nil,
+                             organizationID: identity.organizationUUID)
     }
 
     func buildBlob(old: Data, tokens: FreshTokens) throws -> Data {
@@ -50,12 +55,13 @@ struct ClaudeLoginAdapter: LoginAdapter {
                                     expiresAtMs: tokens.expiresAtMs ?? 0)
     }
 
-    func persist(_ tokens: FreshTokens, email: String) async throws {
+    func persist(_ tokens: FreshTokens, target: LoginTarget) async throws {
         guard let old = try await Keychain.read(service: CredentialBlob.profileService,
-                                                account: email) else {
-            throw LoginError.noSavedProfile(email)
+                                                account: target.credentialAccount) else {
+            throw LoginError.noSavedProfile(target.email)
         }
         let blob = try buildBlob(old: old, tokens: tokens)
-        try await Keychain.upsert(service: CredentialBlob.profileService, account: email, data: blob)
+        try await Keychain.upsert(service: CredentialBlob.profileService,
+                                  account: target.credentialAccount, data: blob)
     }
 }

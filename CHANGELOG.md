@@ -6,6 +6,14 @@ appear on [GitHub Releases](https://github.com/Livin21/pitstop/releases).
 
 ## [Unreleased]
 
+### Fixed
+- **Claude organizations sharing one email collapsed into one account.** Claude
+  profiles, keychain snapshots, usage state, Desktop merging, login validation,
+  and auto-switching are now keyed by email plus organization UUID. Team and
+  personal subscriptions using the same email display independent limits and
+  switch independently; the existing email-keyed snapshot is preserved during
+  migration, and subsequent organizations receive distinct keychain slots.
+
 ## [0.5.0] - 2026-07-16
 ### Added
 - **Choose which limits trigger auto-switch.** Settings gains trigger
