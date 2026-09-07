@@ -80,6 +80,20 @@ final class ProfileStoreCaptureTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: h.file.path))
     }
 
+    /// The mismatch is the one capture failure the user has to act on, and it
+    /// also blocks switching (switchTo snapshots first). The message has to
+    /// name both accounts and the way out, on one line — it surfaces in an
+    /// NSAlert and in `--check`'s "capture failed:" line.
+    func testMismatchMessageNamesBothAccountsAndTheFix() {
+        let text = ProfileStore.CaptureError
+            .mismatch(tokenOwner: "b@x.com", configEmail: "a@x.com")
+            .localizedDescription
+        XCTAssertTrue(text.contains("b@x.com"), text)
+        XCTAssertTrue(text.contains("a@x.com"), text)
+        XCTAssertTrue(text.contains("/login"), text)
+        XCTAssertFalse(text.contains("\n"), "must stay one line: \(text)")
+    }
+
     func testCaptureFilesVerifiedBlob() async throws {
         let h = CaptureHarness()
         h.live = blob(access: "at-a")

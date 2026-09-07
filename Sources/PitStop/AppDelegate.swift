@@ -1265,7 +1265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     body: reason ?? "New Claude Code sessions use this account. Running sessions pick it up on their next token refresh.")
                 refreshAll()
             } catch {
-                showError("Couldn't switch account", error)
+                showError("Couldn't switch to \(displayEmail(email))", error)
             }
         }
     }

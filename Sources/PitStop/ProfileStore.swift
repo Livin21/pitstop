@@ -82,7 +82,13 @@ final class ProfileStore {
         var errorDescription: String? {
             switch self {
             case .mismatch(let owner, let email):
-                return "Skipped saving \(email) — the logged-in credentials belong to \(owner)"
+                return """
+                    The live Claude login belongs to \(owner), but ~/.claude.json \
+                    still names \(email) — saving that pair would file \(owner)'s \
+                    credentials under \(email). Run `claude` and use /login to sign \
+                    in as the account you want live, then try again. Claude Desktop \
+                    bundles its own Claude Code and can take the login over.
+                    """
             case .unverifiable(let why):
                 return "Couldn't confirm the logged-in account's identity: \(why)"
             }
