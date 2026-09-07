@@ -4,6 +4,10 @@
 
 # PitStop
 
+<p align="center">
+  <a href="https://github.com/Livin21/pitstop/releases/latest"><img src="https://img.shields.io/github/v/release/Livin21/pitstop?label=release&color=D97757" alt="Latest release"></a>
+</p>
+
 macOS menu bar app that tracks **usage limits** across your AI coding accounts
 — **Claude Code**, **Claude Desktop**, **OpenAI Codex**, **Google Gemini**
 (CLI + Antigravity), and **OpenCode Go** — and lets you **switch accounts** with one click, so when
