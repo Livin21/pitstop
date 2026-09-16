@@ -36,6 +36,11 @@ enum ClaudeDesktop {
         var email: String
         var orgUUID: String
         var planLabel: String
+
+        var identity: ClaudeAccountIdentity {
+            ClaudeAccountIdentity(email: email, organizationUUID: orgUUID)
+        }
+        var key: String { identity.key }
     }
 
     enum DesktopError: LocalizedError {

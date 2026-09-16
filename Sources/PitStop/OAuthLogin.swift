@@ -12,10 +12,21 @@ struct FreshTokens {
 struct LoginIdentity: Equatable {
     var email: String
     var accountID: String?      // Codex chatgpt_account_id
+    var organizationID: String? // Claude organization UUID
+}
+
+/// The saved row an OAuth flow is allowed to heal. `credentialAccount` is
+/// intentionally independent from identity so legacy email-keyed Claude
+/// snapshots can be retained without collisions for newly captured orgs.
+struct LoginTarget: Equatable {
+    var email: String
+    var accountID: String? = nil
+    var organizationID: String? = nil
+    var credentialAccount: String
 }
 
 enum LoginError: LocalizedError {
-    case identityMismatch(expected: String, got: String)
+    case identityMismatch(expected: LoginTarget, got: LoginIdentity)
     case noSavedProfile(String)
     case stateMismatch
     case cancelled
@@ -26,7 +37,12 @@ enum LoginError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .identityMismatch(let expected, let got):
-            return "You signed in as \(got), but this row is \(expected). "
+            if expected.email.caseInsensitiveCompare(got.email) == .orderedSame,
+               expected.organizationID != nil {
+                return "You signed in to a different Claude organization for \(got.email). "
+                    + "Choose the row's organization and try again."
+            }
+            return "You signed in as \(got.email), but this row is \(expected.email). "
                 + "Switch accounts in your browser and try again."
         case .noSavedProfile(let email): return "No saved profile for \(email)."
         case .stateMismatch: return "Sign-in could not be verified (state mismatch)."
@@ -50,12 +66,13 @@ protocol LoginAdapter {
     /// Hosted redirect used in paste mode (unused when !supportsPaste).
     var pasteRedirectURI: String { get }
 
-    func authorizeURL(challenge: String, state: String, redirectURI: String, pasteMode: Bool) -> URL
+    func authorizeURL(challenge: String, state: String, redirectURI: String,
+                      pasteMode: Bool, target: LoginTarget) -> URL
     func exchange(code: String, state: String, verifier: String, redirectURI: String) async throws -> FreshTokens
     func identity(from tokens: FreshTokens) async throws -> LoginIdentity
     /// Patch the existing saved blob with fresh tokens. Pure, for testing.
     func buildBlob(old: Data, tokens: FreshTokens) throws -> Data
     /// Read the saved profile blob, patch it, and write it back to the profile
     /// slot only. Throws `.noSavedProfile` if there is nothing to heal.
-    func persist(_ tokens: FreshTokens, email: String) async throws
+    func persist(_ tokens: FreshTokens, target: LoginTarget) async throws
 }

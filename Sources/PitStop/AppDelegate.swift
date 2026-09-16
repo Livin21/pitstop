@@ -73,17 +73,33 @@ enum Provider: CaseIterable {
     }
 }
 
-/// One row in the menu. Within a provider, accounts merge by email — the same
-/// Claude account signed into both Claude Code and Claude Desktop is one shared
-/// usage pool, so one row. Across providers they don't: a Claude and a Codex
-/// account can share an email yet be different services, so per-account state
-/// is keyed by `key` (provider-namespaced), not bare email.
+/// One row in the menu. Claude Code and Desktop merge only when both email and
+/// organization match; same-email organizations remain independent rows.
 struct MenuAccount {
     enum Source { case code, desktop, both, codex, geminiCli, geminiAntigravity, geminiBoth, openCodeGo }
     var email: String
     var source: Source
     var planLabel: String
     var isActive: Bool
+    /// Opaque provider-namespaced key for usage/error/action state.
+    var key: String
+
+    init(email: String, source: Source, planLabel: String, isActive: Bool,
+         key: String? = nil) {
+        self.email = email
+        self.source = source
+        self.planLabel = planLabel
+        self.isActive = isActive
+        if let key { self.key = key }
+        else if source == .codex { self.key = "codex:\(email)" }
+        else if source == .geminiCli || source == .geminiAntigravity || source == .geminiBoth {
+            self.key = "gemini:\(email)"
+        } else if source == .openCodeGo {
+            self.key = "opencode:\(email)"
+        } else {
+            self.key = email // legacy/test fallback; production Claude rows pass an explicit org key
+        }
+    }
 
     var isCodex: Bool { source == .codex }
     var isGemini: Bool {
@@ -106,14 +122,6 @@ struct MenuAccount {
         case .openCodeGo: return false
         case .desktop: return false
         }
-    }
-    /// Storage key for usage/error/backoff dicts — namespaced by provider so a
-    /// Claude and a Codex account with the same email don't collide.
-    var key: String {
-        if isCodex { return "codex:\(email)" }
-        if isGemini { return "gemini:\(email)" }
-        if isOpenCode { return "opencode:\(email)" }
-        return email
     }
     /// Which surface within the provider — shown as a small tag, since the
     /// provider itself is now the section header. Codex has one surface (the
@@ -143,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var backoffTimer: Timer?
 
     private let store = ProfileStore()
-    private var activeEmail: String?
+    private var activeClaudeKey: String?
     /// The account Claude Desktop is logged into, if any (read-only — PitStop
     /// can show its usage but can't switch it). Discovered on each refresh.
     private var desktopAccount: ClaudeDesktop.Account?
@@ -251,6 +259,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return i < masks.count ? masks[i] : "account\(i + 1)@example.com"
     }
 
+    private func displayAccount(email: String, planLabel: String) -> String {
+        let shown = displayEmail(email)
+        return planLabel.isEmpty ? shown : "\(shown) · \(planLabel)"
+    }
+
+    private func displayClaudeAccount(key: String) -> String {
+        if let profile = store.profile(forKey: key) {
+            return displayAccount(email: profile.email, planLabel: profile.planLabel)
+        }
+        if let desktopAccount, desktopAccount.key == key {
+            return displayAccount(email: desktopAccount.email, planLabel: desktopAccount.planLabel)
+        }
+        return key
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         restoreUsageCache()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -331,24 +354,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
             lastTopLevelError = nil
+            var rejectedClaudeKeys: Set<String> = []
 
             // Keep the saved copy of the live account in sync.
             do {
                 let capture = try await store.captureCurrent()
-                if capture.changed, let email = capture.profile?.email {
-                    credentialsRenewed(for: email)
+                if capture.changed, let key = capture.profile?.key {
+                    credentialsRenewed(for: key)
+                }
+            } catch let error as ProfileStore.CaptureError {
+                lastTopLevelError = error.localizedDescription
+                // A same-email organization mismatch must gate the active row
+                // too. Otherwise the loop below would deliberately skip its
+                // saved-profile audit and fetch usage with the foreign live
+                // token even though captureCurrent just rejected the pairing.
+                if case .mismatch(let owner, let expected) = error {
+                    rejectedClaudeKeys.insert(expected.key)
+                    usage[expected.key] = nil
+                    recordFetchError(ProfileStore.ForeignCredentialsError(
+                        owner: owner, expected: expected), for: expected.key)
+                } else if let expected = ClaudeConfig.activeIdentity() {
+                    // Verification could not complete, so this cycle must not
+                    // consume the unverified live pairing. Keep stale usage,
+                    // retry capture next cycle, and suppress warming/switching.
+                    rejectedClaudeKeys.insert(expected.key)
+                    recordFetchError(error, for: expected.key)
                 }
             } catch {
                 lastTopLevelError = error.localizedDescription
             }
             store.load()
-            activeEmail = ClaudeConfig.activeEmail()
+            activeClaudeKey = ClaudeConfig.activeIdentity()?.key
 
-            for profile in store.profiles where passedBackoffGate(profile.email) {
-                let email = profile.email
+            for profile in store.profiles
+            where !rejectedClaudeKeys.contains(profile.key) && passedBackoffGate(profile.key) {
+                let key = profile.key
                 do {
                     let (creds, source) = try await freshCredentials(
-                        for: email, isActive: email == activeEmail)
+                        for: profile, isActive: key == activeClaudeKey)
                     // Self-heal installs poisoned before capture-time
                     // verification existed: a row whose saved credentials
                     // belong to another account gets gated instead of
@@ -358,16 +401,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // to be this account's on the way out of the store.
                     if source == .saved,
                        case .poisoned(let owner) = await store.auditIdentity(
-                        email: email, accessToken: creds.accessToken) {
-                        usage[email] = nil
-                        recordFetchError(ProfileStore.ForeignCredentialsError(owner: owner),
-                                         for: email)
+                        profile: profile, accessToken: creds.accessToken) {
+                        usage[key] = nil
+                        let expected = profile.identity ?? owner
+                        recordFetchError(ProfileStore.ForeignCredentialsError(
+                            owner: owner, expected: expected), for: key)
                         continue
                     }
                     let report = try await UsageAPI.fetchUsage(accessToken: creds.accessToken)
-                    recordFetchSuccess(report, for: email)
+                    recordFetchSuccess(report, for: key)
                 } catch {
-                    recordFetchError(error, for: email)
+                    recordFetchError(error, for: key)
                 }
             }
 
@@ -398,7 +442,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// treatment. refreshAll still runs immediately; restored backoffs gate
     /// only the accounts that were mid-backoff when the app quit.
     private func restoreUsageCache() {
-        guard let snap = UsageCache.load() else { return }
+        guard let loaded = UsageCache.load() else { return }
+        let snap = loaded.migratingLegacyClaudeKeys(profiles: store.profiles)
         usage = snap.usage
         codexUsage = snap.codexUsage
         geminiUsage = snap.geminiUsage
@@ -434,14 +479,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// True if `email` is clear to fetch. A future-dated backoff returns false
+    /// True if `key` is clear to fetch. A future-dated backoff returns false
     /// (keep showing stale data); a passed gate is cleared so entries are
     /// always future-dated or absent — `menuNeedsUpdate`'s retryDue check
     /// relies on that.
-    private func passedBackoffGate(_ email: String) -> Bool {
-        if let notBefore = nextFetchAllowed[email] {
+    private func passedBackoffGate(_ key: String) -> Bool {
+        if let notBefore = nextFetchAllowed[key] {
             if Date() < notBefore { return false }
-            nextFetchAllowed[email] = nil
+            nextFetchAllowed[key] = nil
         }
         return true
     }
@@ -463,25 +508,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         needsAction.remove(key)
     }
 
-    private func recordFetchSuccess(_ report: UsageReport, for email: String) {
-        usage[email] = report
-        clearFetchError(for: email)
+    private func recordFetchSuccess(_ report: UsageReport, for key: String) {
+        usage[key] = report
+        clearFetchError(for: key)
     }
 
-    /// Translate a fetch failure into the stale-display state for `email`,
+    /// Translate a fetch failure into the stale-display state for `key`,
     /// shared by the Code (OAuth) and Desktop (claude.ai) fetch paths.
-    private func recordFetchError(_ error: Error, for email: String) {
-        let fails = (failureCount[email] ?? 0) + 1
-        failureCount[email] = fails
+    private func recordFetchError(_ error: Error, for key: String) {
+        let fails = (failureCount[key] ?? 0) + 1
+        failureCount[key] = fails
         switch error {
         case UsageAPI.APIError.rateLimited(let retryAfter):
             // Respect Retry-After; otherwise exponential backoff
             // 2 min → 4 min → … capped at 15 min. Retry timing is rendered
             // from nextFetchAllowed at display time so it never goes stale.
             let delay = retryAfter ?? min(120 * pow(2, Double(fails - 1)), 900)
-            nextFetchAllowed[email] = Date().addingTimeInterval(delay)
-            fetchError[email] = "Rate limited"
-            needsAction.remove(email)
+            nextFetchAllowed[key] = Date().addingTimeInterval(delay)
+            fetchError[key] = "Rate limited"
+            needsAction.remove(key)
         case UsageAPI.APIError.unauthorized,
              ClaudeDesktop.DesktopError.sessionExpired,
              Codex.CodexError.sessionExpired,
@@ -493,13 +538,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // the endpoint every cycle. Refresh Now (or a re-login noticed on
             // the next pass) clears this. It needs the user to act, so the row
             // shows the message without a misleading "retrying in …".
-            nextFetchAllowed[email] = Date().addingTimeInterval(3600)
-            fetchError[email] = (error as? LocalizedError)?.errorDescription
+            nextFetchAllowed[key] = Date().addingTimeInterval(3600)
+            fetchError[key] = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
-            needsAction.insert(email)
+            needsAction.insert(key)
         default:
-            fetchError[email] = error.localizedDescription
-            needsAction.remove(email)
+            fetchError[key] = error.localizedDescription
+            needsAction.remove(key)
         }
     }
 
@@ -512,38 +557,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// rejected token), fall back to the healthy Desktop session here instead of
     /// discarding it and leaving the Code error on the merged row.
     private func refreshDesktopAccount() async {
-        let knownEmail = desktopAccount?.email
-        // Normally skip while the email's backoff is active — except when a
-        // same-email Code profile errored this cycle: that backoff is the Code
+        let knownKey = desktopAccount?.key
+        // Normally skip while this org's backoff is active — except when the
+        // exact matching Code profile errored this cycle: that backoff is the Code
         // failure's, and Desktop is a separate session worth trying as a fallback
         // (its own state is shared on this key, so the shared backoff is Code's).
-        let codeErrored = knownEmail.map { email in
-            store.profiles.contains(where: { $0.email == email }) && fetchError[email] != nil
+        let codeErrored = knownKey.map { key in
+            store.profiles.contains(where: { $0.key == key }) && fetchError[key] != nil
         } ?? false
-        guard codeErrored || (knownEmail.map(passedBackoffGate) ?? true) else { return }
+        guard codeErrored || (knownKey.map(passedBackoffGate) ?? true) else { return }
         do {
             guard let (account, report) = try await ClaudeDesktop.poll() else {
                 desktopAccount = nil
                 return
             }
             desktopAccount = account
-            // Record Desktop usage when no Code profile covers this email; when
+            let key = account.key
+            // Record Desktop usage when no Code profile covers this org; when
             // one does but its Code fetch failed this cycle, refresh the numbers
             // from the healthy Desktop session WITHOUT clearing the Code error,
             // backoff, or needs-action state — the Code credentials are still
             // broken, and clearing the gate here would retry the dead refresh
             // token every cycle and hide the re-login affordance.
-            if !store.profiles.contains(where: { $0.email == account.email }) {
-                recordFetchSuccess(report, for: account.email)
-            } else if fetchError[account.email] != nil {
-                usage[account.email] = report
+            if !store.profiles.contains(where: { $0.key == key }) {
+                recordFetchSuccess(report, for: key)
+            } else if fetchError[key] != nil {
+                usage[key] = report
             }
         } catch {
             // Keep the last-known identity so the row doesn't flicker out;
             // surface the error on it (unless a Code profile owns the email).
-            if let email = knownEmail,
-               !store.profiles.contains(where: { $0.email == email }) {
-                recordFetchError(error, for: email)
+            if let key = knownKey,
+               !store.profiles.contains(where: { $0.key == key }) {
+                recordFetchError(error, for: key)
             }
         }
     }
@@ -774,9 +820,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// OAuth refresh grant (and persisting the result) when needed. The source
     /// comes back with them: the store decides whether the live item really
     /// belongs to this account, so `isActive` is a request, not a verdict.
-    private func freshCredentials(for email: String, isActive: Bool) async throws
+    private func freshCredentials(for profile: Profile, isActive: Bool) async throws
         -> (creds: OAuthCredentials, source: ProfileStore.BlobSource) {
-        guard let stored = try await store.blob(for: email, isActive: isActive) else {
+        guard let stored = try await store.blob(for: profile, isActive: isActive) else {
             throw ProfileStore.StoreError(message: "No stored credentials")
         }
         var creds = try CredentialBlob.parse(stored.data)
@@ -789,7 +835,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                   accessToken: fresh.accessToken,
                                                   refreshToken: fresh.refreshToken,
                                                   expiresAtMs: fresh.expiresAtMs)
-        try await store.storeRefreshedBlob(patched, email: email, source: stored.source)
+        try await store.storeRefreshedBlob(patched, profile: profile, source: stored.source)
         creds.accessToken = fresh.accessToken
         creds.refreshToken = fresh.refreshToken ?? creds.refreshToken
         creds.expiresAtMs = fresh.expiresAtMs
@@ -837,14 +883,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func menuBarReading() -> MenuBarReading {
         switch Settings.menuBarSource {
         case .activeClaudeCode:
-            guard let email = activeEmail, let report = usage[email] else {
-                let tip = activeEmail.flatMap { fetchError[$0] } ?? "PitStop — no usage data yet"
+            guard let key = activeClaudeKey, let report = usage[key] else {
+                let tip = activeClaudeKey.flatMap { fetchError[$0] } ?? "PitStop — no usage data yet"
                 return MenuBarReading(pct: nil, isStale: false, tip: tip)
             }
             let util = IndicatorMetric.current.utilization(of: report)
             return MenuBarReading(pct: util.map { Int($0.rounded()) },
-                                  isStale: fetchError[email] != nil,
-                                  tip: statusTip(email: email, report: report))
+                                  isStale: fetchError[key] != nil,
+                                  tip: statusTip(key: key, report: report))
         case .mostUrgent:
             // Highest binding utilization across every account that has data.
             var best: (name: String, util: Double, stale: Bool)?
@@ -853,7 +899,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     best = (name, util, fetchError[key] != nil)
                 }
             }
-            for (key, report) in usage { consider(key, displayEmail(key), report.maxUtilization) }
+            for (key, report) in usage {
+                consider(key, displayClaudeAccount(key: key), report.maxUtilization)
+            }
             for (key, cu) in codexUsage {
                 let email = String(key.dropFirst("codex:".count))
                 consider(key, "\(displayEmail(email)) (Codex)", cu.maxUtilization)
@@ -874,13 +922,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func statusTip(email: String, report: UsageReport) -> String {
-        var tip = "\(displayEmail(email))\n5-hour \(Format.percent(report.fiveHour?.utilization))"
+    private func statusTip(key: String, report: UsageReport) -> String {
+        var tip = "\(displayClaudeAccount(key: key))\n5-hour \(Format.percent(report.fiveHour?.utilization))"
             + " · weekly \(Format.percent(report.sevenDay?.utilization))"
         for s in report.scoped {
             tip += " · \(s.label) \(Format.percent(s.window.utilization))"
         }
-        if let err = fetchError[email] {
+        if let err = fetchError[key] {
             tip += "\n⚠️ \(err) — showing data from \(Format.updated.string(from: report.fetchedAt))"
         }
         return tip
@@ -889,21 +937,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Menu
 
     /// All rows to show — saved Code profiles, a Desktop-only Claude account,
-    /// and the Codex account. A Claude account on both Code and Desktop merges
-    /// into one row tagged `.both`; Codex is always its own row (different
-    /// provider, even when it shares an email).
+    /// and other providers. Claude Code and Desktop merge only for the same
+    /// email + organization identity.
     private func accountsForMenu() -> [MenuAccount] {
         var rows = store.profiles.map { profile -> MenuAccount in
-            let onDesktop = desktopAccount?.email == profile.email
+            let onDesktop = desktopAccount?.key == profile.key
             return MenuAccount(email: profile.email,
                                source: onDesktop ? .both : .code,
                                planLabel: profile.planLabel,
-                               isActive: profile.email == activeEmail)
+                               isActive: profile.key == activeClaudeKey,
+                               key: profile.key)
         }
         if let d = desktopAccount,
-           !store.profiles.contains(where: { $0.email == d.email }) {
+           !store.profiles.contains(where: { $0.key == d.key }) {
             rows.append(MenuAccount(email: d.email, source: .desktop,
-                                    planLabel: d.planLabel, isActive: false))
+                                    planLabel: d.planLabel, isActive: false,
+                                    key: d.key))
         }
         for c in codexStore.profiles {
             rows.append(MenuAccount(email: c.email, source: .codex,
@@ -996,8 +1045,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // an email are distinguishable; the represented object is the
         // provider-namespaced key the remove action routes on.
         var removable: [(title: String, key: String)] = store.profiles
-            .filter { $0.email != activeEmail }
-            .map { (displayEmail($0.email), $0.email) }
+            .filter { $0.key != activeClaudeKey }
+            .map { (displayAccount(email: $0.email, planLabel: $0.planLabel), $0.key) }
         removable += codexStore.profiles
             .filter { $0.email != codexLiveEmail }
             .map { ("\(displayEmail($0.email)) · Codex", "codex:\($0.email)") }
@@ -1223,7 +1272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             onSwitch: (canSwitch && !offerLogin) ? { [weak self] in
                 if isGemini { self?.performGeminiSwitch(to: email) }
                 else if isCodex { self?.performCodexSwitch(to: email) }
-                else { self?.performSwitch(to: email) }
+                else { self?.performSwitch(to: key) }
             } : nil,
             onLogin: offerLogin ? { [weak self] in self?.performLogin(account) } : nil)
     }
@@ -1253,19 +1302,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Actions
 
-    private func performSwitch(to email: String, auto: Bool = false, reason: String? = nil) {
+    private func performSwitch(to key: String, auto: Bool = false, reason: String? = nil) {
         serializedCredentialOp { [self] in
             do {
-                try await store.switchTo(email: email)
-                activeEmail = email
-                notifiedBucket[email] = nil
+                try await store.switchTo(key: key)
+                activeClaudeKey = key
+                notifiedBucket[key] = nil
+                let label = displayClaudeAccount(key: key)
                 Notifier.shared.post(
-                    title: auto ? "Auto-switched to \(displayEmail(email))"
-                                : "Switched to \(displayEmail(email))",
+                    title: auto ? "Auto-switched to \(label)"
+                                : "Switched to \(label)",
                     body: reason ?? "New Claude Code sessions use this account. Running sessions pick it up on their next token refresh.")
                 refreshAll()
             } catch {
-                showError("Couldn't switch to \(displayEmail(email))", error)
+                showError("Couldn't switch to \(displayClaudeAccount(key: key))", error)
             }
         }
     }
@@ -1279,9 +1329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func evaluateAutoSwitch() {
         guard Settings.autoSwitchEnabled else { return }
         let kinds = Settings.autoSwitchKinds
-        autoSwitch(provider: .claude, live: activeEmail,
-                   candidates: store.profiles.map(\.email),
+        autoSwitch(provider: .claude, live: activeClaudeKey,
+                   candidates: store.profiles.map(\.key),
                    utilization: { fetchError[$0] == nil ? usage[$0]?.maxUtilization(kinds: kinds) : nil },
+                   display: { displayClaudeAccount(key: $0) },
                    perform: { performSwitch(to: $0, auto: true, reason: $1) })
         autoSwitch(provider: .codex, live: codexLiveEmail,
                    candidates: codexStore.profiles.map(\.email),
@@ -1289,6 +1340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                        let key = "codex:\($0)"
                        return fetchError[key] == nil ? codexUsage[key]?.maxUtilization(kinds: kinds) : nil
                    },
+                   display: { displayEmail($0) },
                    perform: { performCodexSwitch(to: $0, auto: true, reason: $1) })
         autoSwitch(provider: .gemini, live: geminiLiveCliEmail,
                    candidates: geminiStore.profiles.map(\.email),
@@ -1296,6 +1348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                        let key = "gemini:\($0)"
                        return fetchError[key] == nil ? geminiUsage[key]?.maxUtilization(kinds: kinds) : nil
                    },
+                   display: { displayEmail($0) },
                    perform: { performGeminiSwitch(to: $0, auto: true, reason: $1) })
     }
 
@@ -1305,20 +1358,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// acts on a transient fetch error. A per-provider cooldown stops flapping.
     private func autoSwitch(provider: Provider, live: String?, candidates: [String],
                             utilization: (String) -> Double?,
+                            display: (String) -> String,
                             perform: (String, String) -> Void) {
-        guard let live, let liveUtil = utilization(live) else { return }
         let threshold = Double(Settings.autoSwitchThreshold)
-        guard liveUtil >= threshold else { return }
         if let last = lastAutoSwitch[provider], Date().timeIntervalSince(last) < 180 { return }
+        guard let decision = Self.autoSwitchDecision(
+            live: live, candidates: candidates, threshold: threshold,
+            utilization: utilization) else { return }
+        lastAutoSwitch[provider] = Date()
+        perform(decision.target,
+                "\(display(decision.live)) hit \(Int(decision.liveUtil.rounded()))% — "
+                + "moved to \(display(decision.target)) (\(Int(decision.targetUtil.rounded()))% used).")
+    }
+
+    /// Pure target selection so same-email organization keys are covered by
+    /// tests without manipulating real usage limits or live credentials.
+    static func autoSwitchDecision(live: String?, candidates: [String], threshold: Double,
+                                   utilization: (String) -> Double?)
+        -> (live: String, target: String, liveUtil: Double, targetUtil: Double)? {
+        guard let live, let liveUtil = utilization(live), liveUtil >= threshold else { return nil }
         guard let target = candidates
             .filter({ $0 != live })
-            .compactMap({ e in utilization(e).map { (e, $0) } })
+            .compactMap({ key in utilization(key).map { (key, $0) } })
             .filter({ $0.1 < threshold })
-            .min(by: { $0.1 < $1.1 }) else { return }   // nowhere better to go
-        lastAutoSwitch[provider] = Date()
-        perform(target.0,
-                "\(displayEmail(live)) hit \(Int(liveUtil.rounded()))% — "
-                + "moved to \(displayEmail(target.0)) (\(Int(target.1.rounded()))% used).")
+            .min(by: { $0.1 < $1.1 }) else { return nil }
+        return (live, target.0, liveUtil, target.1)
     }
 
     /// Start a 5-hour session on each saved Claude account that has none
@@ -1331,18 +1395,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard Settings.sessionWarmingEnabled else { return }
         let now = Date()
         for profile in store.profiles {
-            let email = profile.email
-            guard fetchError[email] == nil, !needsAction.contains(email),
-                  nextFetchAllowed[email].map({ $0 <= now }) ?? true,
+            let key = profile.key
+            guard fetchError[key] == nil, !needsAction.contains(key),
+                  nextFetchAllowed[key].map({ $0 <= now }) ?? true,
                   SessionWarmer.shouldWarm(
                       now: now,
                       windowStartMinutes: Settings.warmWindowStartMinutes,
                       windowEndMinutes: Settings.warmWindowEndMinutes,
-                      resetsAt: usage[email]?.fiveHour?.resetsAt,
-                      lastAttempt: lastWarmAttempt[email]) else { continue }
-            lastWarmAttempt[email] = now
-            guard let fresh = try? await freshCredentials(for: email,
-                                                          isActive: email == activeEmail)
+                      resetsAt: usage[key]?.fiveHour?.resetsAt,
+                      lastAttempt: lastWarmAttempt[key]) else { continue }
+            lastWarmAttempt[key] = now
+            guard let fresh = try? await freshCredentials(for: profile,
+                                                          isActive: key == activeClaudeKey)
             else { continue }
             _ = await SessionWarmer.warm(accessToken: fresh.creds.accessToken)
         }
@@ -1474,6 +1538,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             adapter = ClaudeLoginAdapter()
         }
         let email = account.email
+        let target: LoginTarget
+        if account.provider == .claude {
+            guard let profile = store.profile(forKey: account.key),
+                  let identity = profile.identity else {
+                loginInFlight = false
+                return
+            }
+            target = LoginTarget(email: profile.email,
+                                 organizationID: identity.organizationUUID,
+                                 credentialAccount: profile.credentialAccount)
+        } else {
+            target = LoginTarget(email: email, credentialAccount: email)
+        }
         let ui = OAuthLoginCoordinator.UI(
             openURL: { url in NSWorkspace.shared.open(url) },
             promptPaste: { [weak self] in await self?.pasteWindow.prompt() ?? nil },
@@ -1481,14 +1558,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task { @MainActor in
             defer { loginInFlight = false }
             do {
-                try await OAuthLoginCoordinator().run(adapter: adapter, expectedEmail: email, ui: ui)
+                try await OAuthLoginCoordinator().run(adapter: adapter, target: target, ui: ui)
                 // The rejected token left a 1-hour backoff + needsAction on this
                 // account; clear it so the refresh below actually re-fetches with
                 // the fresh credentials and the row heals immediately (instead of
                 // staying "rejected" until the backoff expires).
                 clearFetchError(for: account.key)
                 if account.isGemini { geminiProject[account.email] = nil }
-                Notifier.shared.post(title: "Signed in to \(displayEmail(email))",
+                let label = account.provider == .claude
+                    ? displayClaudeAccount(key: account.key) : displayEmail(email)
+                Notifier.shared.post(title: "Signed in to \(label)",
                                      body: "Fresh credentials saved. This account is switchable again.")
                 refreshAll()
             } catch LoginError.cancelled {
@@ -1539,7 +1618,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         serializedCredentialOp { [self] in
             do {
                 if let profile = try await store.captureCurrent().profile {
-                    Notifier.shared.post(title: "Saved \(displayEmail(profile.email))",
+                    Notifier.shared.post(
+                        title: "Saved \(displayAccount(email: profile.email, planLabel: profile.planLabel))",
                                          body: "This account can now be switched to from PitStop.")
                 } else {
                     showError("Nothing to save",
@@ -1557,8 +1637,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// reading, and an account removed mid-refresh gets resurrected by the
     /// in-flight cycle's recordFetch* calls.
     private func pruneOrphanedState() {
-        var valid = Set(store.profiles.map(\.email))
-        if let d = desktopAccount { valid.insert(d.email) }
+        var valid = Set(store.profiles.map(\.key))
+        if let d = desktopAccount { valid.insert(d.key) }
         for c in codexStore.profiles { valid.insert("codex:\(c.email)") }
         for g in geminiStore.profiles { valid.insert("gemini:\(g.email)") }
         if OpenCode.isPresent { valid.insert(OpenCode.accountKey) }
@@ -1591,9 +1671,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let email = String(key.dropFirst("codex:".count))
                     try await codexStore.remove(email: email)
                     codexUsage[key] = nil
-                } else {
-                    try await store.remove(email: key)
+                } else if key.hasPrefix("claude:") {
+                    try await store.remove(key: key)
                     usage[key] = nil
+                } else {
+                    // Compatibility for a legacy menu item constructed before
+                    // the org-aware refresh rebuilt the menu.
+                    if let profile = store.profiles.first(where: { $0.credentialAccount == key }) {
+                        try await store.remove(key: profile.key)
+                        usage[profile.key] = nil
+                    }
                 }
                 fetchError[key] = nil
                 nextFetchAllowed[key] = nil
@@ -1624,24 +1711,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Threshold notifications
 
     private func checkThresholds() {
-        guard let email = activeEmail, let report = usage[email],
-              fetchError[email] == nil else { return }
+        guard let key = activeClaudeKey, let report = usage[key],
+              fetchError[key] == nil else { return }
         let pct = report.maxUtilization
         let bucket = pct >= 95 ? 2 : (pct >= 80 ? 1 : 0)
-        let last = notifiedBucket[email] ?? 0
+        let last = notifiedBucket[key] ?? 0
         if bucket > last {
             let reset = report.bindingWindow?.resetsAt.map { Format.reset($0) } ?? ""
             // Point at the saved account with the most headroom.
             let best = store.profiles
-                .filter { $0.email != email }
-                .compactMap { p -> (String, Double)? in
-                    guard let r = usage[p.email], fetchError[p.email] == nil else { return nil }
-                    return (p.email, r.maxUtilization)
+                .filter { $0.key != key }
+                .compactMap { p -> (Profile, Double)? in
+                    guard let r = usage[p.key], fetchError[p.key] == nil else { return nil }
+                    return (p, r.maxUtilization)
                 }
                 .min { $0.1 < $1.1 }
             let hint: String
             if let best, best.1 < 80 {
-                hint = "Best pit: \(displayEmail(best.0)) (\(Int(best.1.rounded()))% used) — switch from the menu."
+                hint = "Best pit: \(displayAccount(email: best.0.email, planLabel: best.0.planLabel)) (\(Int(best.1.rounded()))% used) — switch from the menu."
             } else if best != nil {
                 hint = "All saved accounts are running hot — check the menu."
             } else {
@@ -1649,8 +1736,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             Notifier.shared.post(
                 title: "Claude Code usage at \(Int(pct.rounded()))%",
-                body: "\(displayEmail(email)) — \(reset). \(hint)")
+                body: "\(displayClaudeAccount(key: key)) — \(reset). \(hint)")
         }
-        notifiedBucket[email] = bucket
+        notifiedBucket[key] = bucket
     }
 }

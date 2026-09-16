@@ -4,7 +4,9 @@ import XCTest
 final class GeminiLoginAdapterTests: XCTestCase {
     func testCliAuthorizeURL() {
         let url = GeminiCliLoginAdapter().authorizeURL(
-            challenge: "CH", state: "ST", redirectURI: "http://127.0.0.1:51000/oauth2callback", pasteMode: false)
+            challenge: "CH", state: "ST", redirectURI: "http://127.0.0.1:51000/oauth2callback",
+            pasteMode: false,
+            target: LoginTarget(email: "a@x.com", credentialAccount: "a@x.com"))
         let c = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         XCTAssertEqual(c.host, "accounts.google.com")
         let q = Dictionary(uniqueKeysWithValues: (c.queryItems ?? []).map { ($0.name, $0.value ?? "") })
@@ -27,7 +29,9 @@ final class GeminiLoginAdapterTests: XCTestCase {
     func testAntigravityUsesOwnClientAndScopes() {
         XCTAssertEqual(GeminiAntigravityLoginAdapter().provider, .gemini)
         let url = GeminiAntigravityLoginAdapter().authorizeURL(
-            challenge: "CH", state: "ST", redirectURI: "http://127.0.0.1:51000/oauth2callback", pasteMode: false)
+            challenge: "CH", state: "ST", redirectURI: "http://127.0.0.1:51000/oauth2callback",
+            pasteMode: false,
+            target: LoginTarget(email: "a@x.com", credentialAccount: "a@x.com"))
         let q = Dictionary(uniqueKeysWithValues:
             (URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         XCTAssertEqual(q["client_id"], Gemini.antigravityClient.id)
