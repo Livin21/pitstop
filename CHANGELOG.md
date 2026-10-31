@@ -5,6 +5,8 @@ All notable changes to PitStop are documented here. The format is based on
 appear on [GitHub Releases](https://github.com/Livin21/pitstop/releases).
 
 ## [Unreleased]
+
+## [0.6.1] - 2026-10-31
 ### Changed
 - **Plan chips use Anthropic's new plan names.** On 2026-10-30 Max 20x became
   **Ultra** and Max 5x became **Max**. Tokens still carry the old tier names,
@@ -228,7 +230,8 @@ First versioned release.
 ### Fixed
 - Fall back to Desktop usage when a merged account's Claude Code fetch fails.
 
-[Unreleased]: https://github.com/Livin21/pitstop/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Livin21/pitstop/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/Livin21/pitstop/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Livin21/pitstop/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Livin21/pitstop/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/Livin21/pitstop/compare/v0.4.1...v0.4.2
