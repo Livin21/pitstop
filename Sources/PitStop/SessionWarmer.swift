@@ -10,13 +10,16 @@ enum SessionWarmer {
     /// not-yet-refreshed usage report can't cause hammering.
     static let attemptCooldown: TimeInterval = 600
 
-    /// True when a warm should be attempted: local time-of-day inside the
-    /// start-inclusive, end-exclusive window (wrap-around supported; an
-    /// empty window never warms), no running session (resetsAt nil or
-    /// past), and the per-account cooldown has passed.
+    /// True when a warm should be attempted: the account has a 5-hour limit
+    /// (Ultra accounts have none, so there is no session to start), local
+    /// time-of-day inside the start-inclusive, end-exclusive window
+    /// (wrap-around supported; an empty window never warms), no running
+    /// session (resetsAt nil or past), and the per-account cooldown has passed.
     static func shouldWarm(now: Date, windowStartMinutes: Int, windowEndMinutes: Int,
                            resetsAt: Date?, lastAttempt: Date?,
+                           noFiveHourLimit: Bool = false,
                            calendar: Calendar = .current) -> Bool {
+        guard !noFiveHourLimit else { return false }
         let comps = calendar.dateComponents([.hour, .minute], from: now)
         let t = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         let inWindow = windowStartMinutes <= windowEndMinutes

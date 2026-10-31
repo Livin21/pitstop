@@ -23,10 +23,24 @@ struct Profile {
            org != "\(email)'s Organization" {
             parts.append(org)
         }
-        if let sub = subscriptionType, !sub.isEmpty {
-            parts.append(sub.capitalized)
+        let plan = Self.planName(subscription: subscriptionType, tier: rateLimitTier)
+        if !plan.isEmpty { parts.append(plan) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The plan part of a chip, from the subscription ("max", "team") and the
+    /// rate-limit tier (`default_claude_max_20x`). Anthropic renamed the
+    /// consumer Max plans on 2026-10-30 — Max 20x is "Ultra", Max 5x is just
+    /// "Max" — but tokens still carry the old tier names. Other plans keep
+    /// the "Team · 5x" form. Shared with ClaudeDesktop's chip.
+    static func planName(subscription: String?, tier: String?) -> String {
+        let sub = subscription?.capitalized ?? ""
+        if sub == "Max", let tier {
+            if tier.hasSuffix("max_20x") { return "Ultra" }
+            if tier.hasSuffix("max_5x") { return "Max" }
         }
-        if let tier = rateLimitTier, let r = tier.range(of: "max_") {
+        var parts = sub.isEmpty ? [] : [sub]
+        if let tier, let r = tier.range(of: "max_") {
             parts.append(String(tier[r.upperBound...]))   // "5x" / "20x"
         }
         return parts.joined(separator: " · ")

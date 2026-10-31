@@ -40,7 +40,8 @@ if CommandLine.arguments.contains("--check") {
                     creds.accessToken = fresh.accessToken
                 }
                 let report = try await UsageAPI.fetchUsage(accessToken: creds.accessToken)
-                print("   5-hour  \(Format.percent(report.fiveHour?.utilization))  \(Format.reset(report.fiveHour?.resetsAt))")
+                print("   5-hour  " + (report.noFiveHourLimit ? "No limit"
+                    : "\(Format.percent(report.fiveHour?.utilization))  \(Format.reset(report.fiveHour?.resetsAt))"))
                 print("   weekly  \(Format.percent(report.sevenDay?.utilization))  \(Format.reset(report.sevenDay?.resetsAt))")
             } catch {
                 print("   error: \(error.localizedDescription)")
@@ -53,7 +54,8 @@ if CommandLine.arguments.contains("--check") {
                 let dup = store.profiles.contains { $0.email == acct.email }
                     ? "  (also a saved Code account)" : ""
                 print("\n▣ \(acct.email)  [\(acct.planLabel)]  · Desktop\(dup)")
-                print("   5-hour  \(Format.percent(report.fiveHour?.utilization))  \(Format.reset(report.fiveHour?.resetsAt))")
+                print("   5-hour  " + (report.noFiveHourLimit ? "No limit"
+                    : "\(Format.percent(report.fiveHour?.utilization))  \(Format.reset(report.fiveHour?.resetsAt))"))
                 print("   weekly  \(Format.percent(report.sevenDay?.utilization))  \(Format.reset(report.sevenDay?.resetsAt))")
             } else if ClaudeDesktop.isPresent {
                 print("\nClaude Desktop: installed but not signed in")
@@ -146,27 +148,27 @@ if CommandLine.arguments.contains("--preview") {
                   projectionLine: "↗ on pace to hit limit ~4:10 PM",
                   statusLine: nil, onSwitch: nil),
             .init(email: "personal@example.com",
-                  planLabel: "Max · 5x", isActive: false,
+                  planLabel: "Max", isActive: false,
                   bars: [.init(label: "5h", utilization: 96, resetText: Format.compactReset(tonight)),
                          .init(label: "7d", utilization: 36, resetText: Format.compactReset(nextWeek))],
                   modelsLine: nil, statusLine: nil, onSwitch: {}),
             .init(email: "side@example.com",
-                  planLabel: "Max · 20x", isActive: false,
-                  bars: [.init(label: "5h", utilization: 0, resetText: ""),
+                  planLabel: "Ultra", isActive: false,
+                  bars: [.init(label: "5h", utilization: nil, resetText: "", note: "No limit"),
                          .init(label: "7d", utilization: 100, resetText: Format.compactReset(nextWeek))],
                   modelsLine: "Extra 4%",
                   statusLine: "⚠︎ Rate limited — retrying in 4m · showing 6:01 PM data",
                   onSwitch: {}),
             .init(email: "expired@example.com",
-                  planLabel: "Max · 5x", isActive: false,
+                  planLabel: "Max", isActive: false,
                   bars: [.init(label: "5h", utilization: 0, resetText: ""),
                          .init(label: "7d", utilization: 0, resetText: "")],
                   modelsLine: nil,
                   statusLine: "⚠︎ Token rejected — re-login needed · showing 10:37 PM data",
                   onSwitch: nil, onLogin: {}),
             .init(email: "anna.desktop@example.com",
-                  planLabel: "Max · 20x", isActive: false, sourceBadge: "Code · Desktop",
-                  bars: [.init(label: "5h", utilization: 12, resetText: Format.compactReset(tonight)),
+                  planLabel: "Ultra", isActive: false, sourceBadge: "Code · Desktop",
+                  bars: [.init(label: "5h", utilization: nil, resetText: "", note: "No limit"),
                          .init(label: "7d", utilization: 41, resetText: Format.compactReset(nextWeek))],
                   modelsLine: nil, statusLine: nil, onSwitch: {}),
             .init(email: "codex@example.com",

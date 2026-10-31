@@ -36,7 +36,8 @@ enum IndicatorMetric: String, CaseIterable {
     }
 
     /// nil = the pinned window is absent from the report (shows as "–",
-    /// not a misleading 0%).
+    /// not a misleading 0%). An account with no 5-hour limit at all (Ultra)
+    /// falls back to the highest limit instead.
     func utilization(of report: UsageReport) -> Double? {
         switch self {
         case .binding:
@@ -44,7 +45,10 @@ enum IndicatorMetric: String, CaseIterable {
                 || report.sevenDay?.utilization != nil
                 || report.scoped.contains { $0.window.utilization != nil }
             return hasData ? report.maxUtilization : nil
-        case .fiveHour: return report.fiveHour?.utilization
+        case .fiveHour:
+            return report.noFiveHourLimit
+                ? IndicatorMetric.binding.utilization(of: report)
+                : report.fiveHour?.utilization
         case .weekly: return report.sevenDay?.utilization
         }
     }
@@ -875,7 +879,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func statusTip(email: String, report: UsageReport) -> String {
-        var tip = "\(displayEmail(email))\n5-hour \(Format.percent(report.fiveHour?.utilization))"
+        let fiveHour = report.noFiveHourLimit
+            ? "no limit" : Format.percent(report.fiveHour?.utilization)
+        var tip = "\(displayEmail(email))\n5-hour \(fiveHour)"
             + " · weekly \(Format.percent(report.sevenDay?.utilization))"
         for s in report.scoped {
             tip += " · \(s.label) \(Format.percent(s.window.utilization))"
@@ -1154,8 +1160,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             let report = usage[key]
             bars = [
-                .init(label: "5h", utilization: report?.fiveHour?.utilization,
-                      resetText: Format.compactReset(report?.fiveHour?.resetsAt)),
+                report?.noFiveHourLimit == true
+                    ? .init(label: "5h", utilization: nil, resetText: "", note: "No limit")
+                    : .init(label: "5h", utilization: report?.fiveHour?.utilization,
+                            resetText: Format.compactReset(report?.fiveHour?.resetsAt)),
                 .init(label: "7d", utilization: report?.sevenDay?.utilization,
                       resetText: Format.compactReset(report?.sevenDay?.resetsAt)),
             ] + (report?.scoped ?? []).map {
@@ -1339,7 +1347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                       windowStartMinutes: Settings.warmWindowStartMinutes,
                       windowEndMinutes: Settings.warmWindowEndMinutes,
                       resetsAt: usage[email]?.fiveHour?.resetsAt,
-                      lastAttempt: lastWarmAttempt[email]) else { continue }
+                      lastAttempt: lastWarmAttempt[email],
+                      noFiveHourLimit: usage[email]?.noFiveHourLimit ?? false) else { continue }
             lastWarmAttempt[email] = now
             guard let fresh = try? await freshCredentials(for: email,
                                                           isActive: email == activeEmail)

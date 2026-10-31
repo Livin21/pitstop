@@ -9,6 +9,7 @@ final class AccountRowView: NSView {
         let label: String          // "5h" / "7d"
         let utilization: Double?   // nil = unknown
         let resetText: String
+        var note: String? = nil    // "No limit" — drawn instead of a bar and %
     }
 
     struct Model {
@@ -196,6 +197,21 @@ final class AccountRowView: NSView {
             bar.label.draw(at: NSPoint(x: rowBarX - 6 - labelSize.width, y: y + 1),
                            withAttributes: [.font: labelFont,
                                             .foregroundColor: NSColor.secondaryLabelColor])
+
+            // A window that doesn't apply ("No limit"): no track, no number —
+            // an empty bar would read as 0% used.
+            if let note = bar.note {
+                let noteFont = NSFont.systemFont(ofSize: 11)
+                let noteSize = note.size(withAttributes: [.font: noteFont])
+                note.draw(at: NSPoint(x: pctRightEdge - noteSize.width, y: y),
+                          withAttributes: [
+                              .font: noteFont,
+                              .foregroundColor: model.barsDimmed
+                                  ? NSColor.tertiaryLabelColor : NSColor.secondaryLabelColor,
+                          ])
+                y += 16
+                continue
+            }
 
             let trackRect = NSRect(x: rowBarX, y: y + 4.5, width: rowBarWidth, height: 5)
             NSColor.labelColor.withAlphaComponent(0.12).setFill()

@@ -5,6 +5,23 @@ All notable changes to PitStop are documented here. The format is based on
 appear on [GitHub Releases](https://github.com/Livin21/pitstop/releases).
 
 ## [Unreleased]
+### Changed
+- **Plan chips use Anthropic's new plan names.** On 2026-10-30 Max 20x became
+  **Ultra** and Max 5x became **Max**. Tokens still carry the old tier names,
+  so PitStop maps them: a chip that read "Max · 20x" now reads "Ultra", and
+  "Max · 5x" reads "Max". Team and other plans keep their "Team · 5x" form.
+
+### Fixed
+- **Ultra accounts showed a blank 5-hour bar and a "–" in the menu bar.**
+  Anthropic removed the 5-hour limit for Ultra accounts, and the usage API now
+  reports it as absent. PitStop read that as missing data. The 5h line now
+  reads **No limit**. A menu bar set to the 5-hour limit shows the account's
+  highest limit instead of "–". With only the 5-hour kind enabled,
+  auto-switch counts an Ultra account as 0 % used rather than as having no
+  data.
+- **Session warming sent a request every 10 minutes to Ultra accounts.** With
+  no 5-hour window to start, the "no session running" check never turned
+  false. Accounts without a 5-hour limit are now skipped.
 
 ## [0.6.0] - 2026-09-07
 ### Added

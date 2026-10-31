@@ -123,7 +123,10 @@ Or set it up manually:
   only glyphs that keep their color.) **Settings** customizes it: what it shows
   (icon & percent / icon only / percent only), which account it tracks (the
   active Claude Code account, or the most-used account across any provider),
-  and which limit drives the number (highest / 5-hour / weekly).
+  and which limit drives the number (highest / 5-hour / weekly). Ultra
+  accounts (formerly Max 20x) have no 5-hour limit: their 5h line reads
+  **No limit**, and a menu bar set to the 5-hour limit shows the highest
+  limit for them instead.
 - **Auto-switch** (off by default) flips a switchable provider's live account
   — Claude Code, Codex, or Gemini — to the saved account with the most
   headroom once the live one crosses a configurable threshold, and notifies
@@ -135,7 +138,8 @@ Or set it up manually:
   saved Claude account whenever none is running during your configured
   hours (default 6 AM–6 PM), so limit resets land inside your day instead
   of at its end. Costs about one token per account per session; caps are
-  unaffected — it only chooses when the session clock starts.
+  unaffected — it only chooses when the session clock starts. Accounts with
+  no 5-hour limit (Ultra) are skipped.
 - **Time-to-limit projection** (on by default) samples usage over time and,
   when a window is trending toward full *before* it resets, shows
   "↗ on pace to hit limit ~3:40 PM" on the row.

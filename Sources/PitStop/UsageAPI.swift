@@ -15,6 +15,10 @@ struct ScopedWindow: Codable, Equatable {
 
 struct UsageReport: Codable, Equatable {
     var fiveHour: UsageWindow?
+    /// The account has no 5-hour limit at all — Ultra (formerly Max 20x)
+    /// since 2026-10-30. Distinct from `fiveHour == nil` alone, which can
+    /// just mean the window wasn't reported.
+    var noFiveHourLimit = false
     var sevenDay: UsageWindow?
     var scoped: [ScopedWindow] = []
     var extraUsageEnabled = false
@@ -40,10 +44,31 @@ struct UsageReport: Codable, Equatable {
     /// treat nil as "no trustworthy data" (never a trigger, never a target).
     func maxUtilization(kinds: Set<LimitKind>) -> Double? {
         var values: [Double] = []
-        if kinds.contains(.session), let u = fiveHour?.utilization { values.append(u) }
+        if kinds.contains(.session) {
+            // No 5-hour limit can never block the account: 0%, not "no data".
+            if let u = fiveHour?.utilization { values.append(u) }
+            else if noFiveHourLimit { values.append(0) }
+        }
         if kinds.contains(.weekly), let u = sevenDay?.utilization { values.append(u) }
         if kinds.contains(.perModel) { values += scoped.compactMap(\.window.utilization) }
         return values.max()
+    }
+}
+
+extension UsageReport {
+    /// Strict like the synthesized decoder, except `noFiveHourLimit`: reports
+    /// cached before it existed lack the key and are otherwise fine.
+    /// Declared in an extension so the memberwise init and the synthesized
+    /// `encode(to:)` stay.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fiveHour = try c.decodeIfPresent(UsageWindow.self, forKey: .fiveHour)
+        noFiveHourLimit = try c.decodeIfPresent(Bool.self, forKey: .noFiveHourLimit) ?? false
+        sevenDay = try c.decodeIfPresent(UsageWindow.self, forKey: .sevenDay)
+        scoped = try c.decode([ScopedWindow].self, forKey: .scoped)
+        extraUsageEnabled = try c.decode(Bool.self, forKey: .extraUsageEnabled)
+        extraUsageUtilization = try c.decodeIfPresent(Double.self, forKey: .extraUsageUtilization)
+        fetchedAt = try c.decode(Date.self, forKey: .fetchedAt)
     }
 }
 
@@ -110,6 +135,9 @@ enum UsageAPI {
         report.sevenDay = window(root["seven_day"])
         let limits = (root["limits"] as? [[String: Any]]) ?? []
         if report.fiveHour == nil { report.fiveHour = limitWindow(limits, kind: "session") }
+        // Ultra accounts send an explicit `"five_hour": null` and no
+        // `session` limit: the limit is gone, not unreported.
+        report.noFiveHourLimit = report.fiveHour == nil && root["five_hour"] is NSNull
         if report.sevenDay == nil { report.sevenDay = limitWindow(limits, kind: "weekly_all") }
         report.scoped = limits
             .filter { $0["kind"] as? String == "weekly_scoped" }

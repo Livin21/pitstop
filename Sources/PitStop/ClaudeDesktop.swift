@@ -129,19 +129,18 @@ enum ClaudeDesktop {
         return root?["rate_limit_tier"] as? String
     }
 
-    /// "Max · 20x" — mirrors Profile.planLabel: drop auto "<email>'s
-    /// Organization" names and the `default_claude_` tier prefix.
+    /// "Ultra" — mirrors Profile.planLabel: drop auto "<email>'s
+    /// Organization" names and map the tier through Profile.planName.
     private static func planLabel(orgName: String?, email: String,
                                   capabilities: [String], tier: String?) -> String {
         var parts: [String] = []
         if let org = orgName, !org.isEmpty, org != "\(email)'s Organization" {
             parts.append(org)
         }
-        if capabilities.contains("claude_max") { parts.append("Max") }
-        else if capabilities.contains("claude_pro") { parts.append("Pro") }
-        if let tier, let r = tier.range(of: "max_") {
-            parts.append(String(tier[r.upperBound...]))   // "5x" / "20x"
-        }
+        let sub = capabilities.contains("claude_max") ? "Max"
+            : (capabilities.contains("claude_pro") ? "Pro" : nil)
+        let plan = Profile.planName(subscription: sub, tier: tier)
+        if !plan.isEmpty { parts.append(plan) }
         return parts.joined(separator: " · ")
     }
 
